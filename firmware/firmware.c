@@ -41,6 +41,8 @@ const float ORDENADA = 141.38 ;
 #define CURVA_01 0.3f
 #define CURVA_02 0.4f
 #define CURVA_03 0.5f
+#define CURVA_04 0
+
 //Cosntantes del auto
 #define RADIUS 0.134f //radio entre el centro de las ruedas en m
 //Configuración del teclado matricial
@@ -201,8 +203,8 @@ void task_motor(void *params) {
     float radius = 0;
 
     VelData_t diff_vel ;
-    uint16_t vel_pwm_right = 0 ;
-    uint16_t vel_pwm_left = 0 ;
+    uint16_t vel_pwm_bigger = 0 ;
+    uint16_t vel_pwm_less = 0 ;
     uint16_t aux_vel_inverter = 0 ;
 
     int set_time ;
@@ -213,39 +215,48 @@ void task_motor(void *params) {
         
         if (xQueueReceive(q_codigo, &buffer, portMAX_DELAY)) {
             printf("Buffer recibido: %s\n", buffer);
-            if      (buffer[0]=='1'){linear_speed=VEL_01;}
-            else if (buffer[0]=='2'){linear_speed=VEL_02;}
-            else if (buffer[0]=='3'){linear_speed=VEL_03;}
+            if      (buffer[0]=='3'){linear_speed=VEL_01;}
+            else if (buffer[0]=='6'){linear_speed=VEL_02;}
+            else if (buffer[0]=='9'){linear_speed=VEL_03;}
             
             if      (buffer[1]=='A'){radius=CURVA_01;}
             else if (buffer[1]=='B'){radius=CURVA_02;}
             else if (buffer[1]=='C'){radius=CURVA_03;}
+            else if (buffer[1]=='D'){radius=CURVA_04;}
 
-            set_time = 2 * PI * radius / linear_speed;
+            
 
-            diff_vel.v_left     = linear_speed * (1 + RADIUS / ( 2 * radius ) ) ;
-            diff_vel.v_right    = linear_speed * (1 - RADIUS / ( 2 * radius ) ) ;
+            if (buffer[1]=='D'){
+                set_time = 20;
+                diff_vel.v_left     =   linear_speed;
+                diff_vel.v_right    =   linear_speed;
+            }else {
+                set_time = 2 * PI * radius / linear_speed;
+                diff_vel.v_left     = linear_speed * (1 + RADIUS / ( 2 * radius ) ) ;
+                diff_vel.v_right    = linear_speed * (1 - RADIUS / ( 2 * radius ) ) ;
+            }
 
             printf("Velocidad: %.2f | Radio: %.2f | Left: %.2f | Right: %.2f | Time: %d \n",
                 linear_speed, radius , diff_vel.v_left , diff_vel.v_right , set_time);
 
-            vel_pwm_right = diff_vel.v_right * PENDIENTE + ORDENADA;
-            vel_pwm_left = diff_vel.v_left * PENDIENTE + ORDENADA;
+            // PASA LA VELOCIDAD DE M/SEG A PWM
+            vel_pwm_bigger = diff_vel.v_right * PENDIENTE + ORDENADA;
+            vel_pwm_less = diff_vel.v_left * PENDIENTE + ORDENADA;
 
-            printf("vel_pwm_right = %hu, vel_pwm_left = %hu\n", vel_pwm_right, vel_pwm_left);
+            printf("vel_pwm_right = %hu, vel_pwm_left = %hu\n", vel_pwm_bigger, vel_pwm_less);
             
-            motor_set_speed(MOTOR_LEFT,255);
-            motor_set_speed(MOTOR_RIGHT,200);
+            motor_set_speed(MOTOR_LEFT,vel_pwm_less);
+            motor_set_speed(MOTOR_RIGHT,vel_pwm_bigger);
 
             vTaskDelay(pdMS_TO_TICKS(set_time/4 * 1000));
 
-            motor_set_speed(MOTOR_LEFT,200);
-            motor_set_speed(MOTOR_RIGHT,255);
+            motor_set_speed(MOTOR_LEFT,vel_pwm_bigger);
+            motor_set_speed(MOTOR_RIGHT,vel_pwm_less);
 
             vTaskDelay(pdMS_TO_TICKS(set_time/2 * 1000));
             
-            motor_set_speed(MOTOR_LEFT,255);
-            motor_set_speed(MOTOR_RIGHT,200);
+            motor_set_speed(MOTOR_LEFT,vel_pwm_less);
+            motor_set_speed(MOTOR_RIGHT,vel_pwm_bigger);
 
             vTaskDelay(pdMS_TO_TICKS(set_time/4 * 1000));
 
@@ -272,10 +283,10 @@ void task_matrix(void *params) {
 
             if (tecla_actual != '#') {
                 //
-                if (tecla_actual == '1' || tecla_actual == '2' || tecla_actual == '3') {
+                if (tecla_actual == '3' || tecla_actual == '6' || tecla_actual == '9') {
                     buffer[0] = tecla_actual;
                     cod_num = 1;
-                }else if (tecla_actual == 'A' || tecla_actual == 'B' || tecla_actual == 'C') {
+                }else if (tecla_actual == 'A' || tecla_actual == 'B' || tecla_actual == 'C'|| tecla_actual == 'D') {
                     buffer[1] = tecla_actual;
                     cod_letter = 1 ;
                 }else {buffer[index++] = tecla_actual;}
