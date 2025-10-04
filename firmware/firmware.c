@@ -28,21 +28,24 @@
 #define MOTOR_LEFT      1
 #define MOTOR_RIGHT     2
 //Contastante de conversion de velocidad a PWN
-//#define PENDIENTE   0.00326
-//#define ORDENADA    -0.5684
-const float  PENDIENTE = 72.36 ;
-const float ORDENADA = 141.38 ;
+#define PENDIENTE   1.2045f
+#define ORDENADA    127.43f
+//const float  PENDIENTE = 72.36 ;
+//const float ORDENADA = 141.38 ;
 #define PI 3.14f
 //Modos 
 //SEGUN EL MODO, PONEMOS LA VELOCIDAD
-#define VEL_01  0.175f
-#define VEL_02  0.19f
-#define VEL_03  0.205f
+#define VEL_01  97.0f
+#define VEL_02  76.5f
+#define VEL_03  57.9f
 #define CURVA_01 0.3f
 #define CURVA_02 0.4f
 #define CURVA_03 0.5f
+#define RECTA 0.0f
+
 //Cosntantes del auto
 #define RADIUS 0.134f //radio entre el centro de las ruedas en m
+#define R_WHEEL 0.0325f
 //Configuración del teclado matricial
 #define FILAS 4
 #define COLUMNAS 4
@@ -203,7 +206,7 @@ void task_motor(void *params) {
     VelData_t diff_vel ;
     uint16_t vel_pwm_right = 0 ;
     uint16_t vel_pwm_left = 0 ;
-    uint16_t aux_vel_inverter = 0 ;
+    float aux_vel = 0 ;
 
     int set_time ;
 
@@ -213,41 +216,64 @@ void task_motor(void *params) {
         
         if (xQueueReceive(q_codigo, &buffer, portMAX_DELAY)) {
             printf("Buffer recibido: %s\n", buffer);
-            if      (buffer[0]=='1'){linear_speed=VEL_01;}
-            else if (buffer[0]=='2'){linear_speed=VEL_02;}
-            else if (buffer[0]=='3'){linear_speed=VEL_03;}
+            if      (buffer[0]=='3'){linear_speed=VEL_01;}
+            else if (buffer[0]=='6'){linear_speed=VEL_02;}
+            else if (buffer[0]=='9'){linear_speed=VEL_03;}
             
             if      (buffer[1]=='A'){radius=CURVA_01;}
             else if (buffer[1]=='B'){radius=CURVA_02;}
             else if (buffer[1]=='C'){radius=CURVA_03;}
+            else if (buffer[1]=='D'){radius=RECTA;}
 
-            set_time = 2 * PI * radius / linear_speed;
+            if (buffer[1] == 'A' || buffer[1] == 'B' || buffer[1] == 'C' ){
+                //PASA DE ACTIVACIONES A VUELTAS CON (lineer_speed/21)
+                //el 2*PI lo pasa a velocidad angular y el R_WHEEL a velocidad lineal
+                aux_vel = (linear_speed / 21) * 2 * PI * R_WHEEL;
+                set_time = 1000 * 2 * PI * radius / aux_vel;
 
-            diff_vel.v_left     = linear_speed * (1 + RADIUS / ( 2 * radius ) ) ;
-            diff_vel.v_right    = linear_speed * (1 - RADIUS / ( 2 * radius ) ) ;
+                diff_vel.v_left     = linear_speed * (1 + RADIUS / ( 2 * radius ) ) ;
+                diff_vel.v_right    = linear_speed * (1 - RADIUS / ( 2 * radius ) ) ;
+
+                vel_pwm_right = diff_vel.v_right * PENDIENTE + ORDENADA;
+                vel_pwm_left = diff_vel.v_left * PENDIENTE + ORDENADA;
+
+                motor_set_speed(MOTOR_LEFT,linear_speed);
+                motor_set_speed(MOTOR_RIGHT,linear_speed);
+
+                vTaskDelay(pdMS_TO_TICKS(set_time/4 ));
+
+                motor_set_speed(MOTOR_LEFT,vel_pwm_left);
+                motor_set_speed(MOTOR_RIGHT,vel_pwm_right);
+
+                vTaskDelay(pdMS_TO_TICKS(set_time/4 ));
+
+                motor_set_speed(MOTOR_LEFT,vel_pwm_right);
+                motor_set_speed(MOTOR_RIGHT,vel_pwm_left);
+
+                vTaskDelay(pdMS_TO_TICKS(set_time/2));
+                
+                motor_set_speed(MOTOR_LEFT,vel_pwm_left);
+                motor_set_speed(MOTOR_RIGHT,vel_pwm_right);
+
+                vTaskDelay(pdMS_TO_TICKS(set_time/4));
+            }else if (buffer[1]=='D'){
+                diff_vel.v_left     = linear_speed  ;
+                diff_vel.v_right    = linear_speed  ;
+
+                vel_pwm_right = diff_vel.v_right * PENDIENTE + ORDENADA;
+                vel_pwm_left = diff_vel.v_left * PENDIENTE + ORDENADA;
+
+                motor_set_speed(MOTOR_LEFT,vel_pwm_left);
+                motor_set_speed(MOTOR_RIGHT,vel_pwm_right);
+
+                vTaskDelay(pdMS_TO_TICKS(5000));
+            }
+            
 
             printf("Velocidad: %.2f | Radio: %.2f | Left: %.2f | Right: %.2f | Time: %d \n",
                 linear_speed, radius , diff_vel.v_left , diff_vel.v_right , set_time);
 
-            vel_pwm_right = diff_vel.v_right * PENDIENTE + ORDENADA;
-            vel_pwm_left = diff_vel.v_left * PENDIENTE + ORDENADA;
-
-            printf("vel_pwm_right = %hu, vel_pwm_left = %hu\n", vel_pwm_right, vel_pwm_left);
-            
-            motor_set_speed(MOTOR_LEFT,255);
-            motor_set_speed(MOTOR_RIGHT,200);
-
-            vTaskDelay(pdMS_TO_TICKS(set_time/4 * 1000));
-
-            motor_set_speed(MOTOR_LEFT,200);
-            motor_set_speed(MOTOR_RIGHT,255);
-
-            vTaskDelay(pdMS_TO_TICKS(set_time/2 * 1000));
-            
-            motor_set_speed(MOTOR_LEFT,255);
-            motor_set_speed(MOTOR_RIGHT,200);
-
-            vTaskDelay(pdMS_TO_TICKS(set_time/4 * 1000));
+            printf("vel_pwm_right = %hu, vel_pwm_left = %hu\n", vel_pwm_right, vel_pwm_left); 
 
         }
             
@@ -272,10 +298,10 @@ void task_matrix(void *params) {
 
             if (tecla_actual != '#') {
                 //
-                if (tecla_actual == '1' || tecla_actual == '2' || tecla_actual == '3') {
+                if (tecla_actual == '3' || tecla_actual == '6' || tecla_actual == '9') {
                     buffer[0] = tecla_actual;
                     cod_num = 1;
-                }else if (tecla_actual == 'A' || tecla_actual == 'B' || tecla_actual == 'C') {
+                }else if (tecla_actual == 'A' || tecla_actual == 'B' || tecla_actual == 'C'|| tecla_actual == 'D') {
                     buffer[1] = tecla_actual;
                     cod_letter = 1 ;
                 }else {buffer[index++] = tecla_actual;}
