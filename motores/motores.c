@@ -16,8 +16,8 @@
 #define MOTOR_M1_PWM 26  // GPIO con soporte PWM
 //MACROS PARA EL TACOMETRO
 #define IN_PIN_TACOMETRO 28
-const float  PENDIENTE = 2.29 ;
-const float ORDENADA = 174.79 ;
+const float  PENDIENTE = 1.2045 ;
+const float ORDENADA = 127.43;
 #define VENTANA_MS 100
 // Configuración de la frecuencia PWM (Hz)
 #define PWM_FREQ 15000
@@ -144,22 +144,27 @@ void task_motor(void *params) {
     motor_init();
     motor_set_direction(1,false);  // Sentido "hacia adelante"
     motor_set_direction(2,false);
-    uint16_t speed = 0;
-    //unsigned int sentido = 0;
+    uint16_t speed = 255;
+    unsigned int sentido = 0;
 
     while (1) {
         //motor_set_speed(speed);
-        
-        if (xQueueReceive(q_vel_impuesta, &speed, portMAX_DELAY)) {
-
-            printf("Nueva velocidad recibida: %u\n", speed);
-
-            motor_set_speed(speed);
-            vTaskDelay(pdMS_TO_TICKS(250));
+        if (sentido == 0 ){
+            speed -= 5;
         }
+        if ( sentido == 1 ) {
+            speed += 5;
+        }
+        if (speed <= 120    ) { sentido = 1 ;} // SENTIDO ES IGUAL A UNO, AUMENTA
+        if (speed >= 255    ) { sentido = 0 ;} // SENTIDO ES IGUAL A CERO, DECRECE
+        //if (xQueueReceive(q_vel_impuesta, &speed, portMAX_DELAY)) {
+
             
-           //speed = 0;
-           //vTaskDelay(pdMS_TO_TICKS(100));
+        printf("Nueva velocidad recibida: %u\n", speed);
+        motor_set_speed(speed);
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        //}
+            
         
     }
 }
@@ -288,10 +293,9 @@ void task_tacometro(void *params) {
             
             if (counter != 0){
                 vel_pwm = counter * PENDIENTE + ORDENADA;
-                //printf("VEL PWM MEDIDA: %.2f\n", vel_pwm);
+                //printf ("Activaciones por segundo %d \n",counter);
+                printf("VEL PWM MEDIDA: %.2f\n", vel_pwm);
                 //printf("Vueltas por segundo: %.2f\n", vueltas);
-                //printf("Velocidad PWM: %.2f\n", vel_pwm);
-                //xQueueSend(q_tacometro , &vueltas , portMAX_DELAY );
                 counter = 0;
                 vueltas = 0;
                 xQueueOverwrite(q_vel_medida , &vel_pwm  );
@@ -316,7 +320,7 @@ int main() {
     xTaskCreate(task_matrix     , "Matrix"      , 4 * configMINIMAL_STACK_SIZE  , NULL, 2, NULL);
     xTaskCreate(task_motor      , "Motor"       , configMINIMAL_STACK_SIZE *2   , NULL, 1, NULL);
     xTaskCreate(task_tacometro  , "Tacometro"   , configMINIMAL_STACK_SIZE + 100, NULL, 2, NULL);
-    xTaskCreate(task_control    , "Control"     , configMINIMAL_STACK_SIZE + 100, NULL, 3, NULL);
+    //xTaskCreate(task_control    , "Control"     , configMINIMAL_STACK_SIZE + 100, NULL, 3, NULL);
 
     vTaskStartScheduler();
 
