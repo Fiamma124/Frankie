@@ -34,6 +34,8 @@ project(firmware C CXX ASM)
 pico_sdk_init()
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../freertos ${CMAKE_BINARY_DIR}/freertos)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../lcd ${CMAKE_BINARY_DIR}/lcd)
+# add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../bluetooth ${CMAKE_BINARY_DIR}/bluetooth)
+
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(firmware firmware.c )
@@ -42,7 +44,7 @@ pico_set_program_name(firmware "firmware")
 pico_set_program_version(firmware "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(firmware 0)
+pico_enable_stdio_uart(firmware 1)
 pico_enable_stdio_usb(firmware 1)
 
 # Add the standard library to the build
