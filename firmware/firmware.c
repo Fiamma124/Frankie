@@ -8,6 +8,7 @@
 #include "string.h"
 #include "lcd.h"
 
+
 // MACROS
 // Eleccion de GPIO para SDA y SCL para el LCD
 #define SDA_GPIO    14
@@ -51,9 +52,17 @@
 #define COLUMNAS 4
 #define MAX_INPUT 4
 
+//Defino lo necesario para hacer andar la UART
+#define UART_ID uart0
+#define UART_TX_PIN 16
+#define UART_RX_PIN 17
+#define BAUD_RATE 115200
+
 //Defino mi cola
 //QueueHandle_t q_matrix ;
 QueueHandle_t q_tacometro ;
+QueueHandle_t q_uart ;
+
 
 typedef struct {
     float v_right;
@@ -110,6 +119,14 @@ void configurar_gpio() {
     //Inicializo el display
     lcd_init(i2c1, 0x27 );
     lcd_clear();
+}
+
+void init_uart() {
+    // Inicialización UART
+    uart_init(UART_ID, BAUD_RATE);
+    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART); 
+    stdio_uart_init_full(uart0, BAUD_RATE, UART_TX_PIN, UART_RX_PIN);
 }
 char escanear_teclado() {
     for (int f = 0; f < FILAS; f++) {
@@ -214,11 +231,11 @@ void task_motor(void *params) {
         motor_set_speed(MOTOR_LEFT,0);
         motor_set_speed(MOTOR_RIGHT,0);
         
-        if (xQueueReceive(q_codigo, &buffer, portMAX_DELAY)) {
+        if (xQueueReceive(q_uart, &buffer, portMAX_DELAY)) {
             printf("Buffer recibido: %s\n", buffer);
-            if      (buffer[0]=='3'){linear_speed=VEL_01;}
-            else if (buffer[0]=='6'){linear_speed=VEL_02;}
-            else if (buffer[0]=='9'){linear_speed=VEL_03;}
+            if      (buffer[0]=='1'){linear_speed=VEL_01;}
+            else if (buffer[0]=='2'){linear_speed=VEL_02;}
+            else if (buffer[0]=='3'){linear_speed=VEL_03;}
             
             if      (buffer[1]=='A'){radius=CURVA_01;}
             else if (buffer[1]=='B'){radius=CURVA_02;}
@@ -349,6 +366,62 @@ void task_lcd(void *params) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }*/
+
+void task_bluetooth(void *params) {
+    char buffer[4] = {0}; // Donde se guardará el recorrido preseteado. Ej "1A#"
+    int cod_num = 0;
+    int index = 2;
+    int cod_letter = 0 ;
+
+    while (true) {
+        if (uart_is_readable(UART_ID)) {
+            char c = uart_getc(UART_ID);
+
+           if (c != '#') {
+                //
+                if (c == '1' || c == '2' || c == '3') {
+                    buffer[0] = c;
+                    cod_num = 1;
+                }else if (c == 'A' || c == 'B' || c == 'C'|| c == 'D') {
+                    buffer[1] = c;
+                    cod_letter = 1 ;
+                }else {buffer[index++] = c;}
+            }
+
+            if (c == '#') {
+                buffer[index] = '\0';
+                printf("Secuencia completa recibida: %s\n", buffer);
+
+                // Verifica formato
+                    if (cod_num == 1 && cod_letter==1) {
+                    buffer[2] = '\0';
+                    printf("Ingresado: %s\n", buffer);
+                    //index = 2;
+                    xQueueSend(q_uart , buffer , 0 );
+                    printf("Ya paso por la cola \n");
+                    memset(buffer, 0, sizeof(buffer));
+                    cod_num = 0; 
+                    cod_letter = 0;
+                } else {
+                    printf("Formato inválido\n");
+                }
+
+                // Reinicia el buffer y el índice después de procesar la cadena
+                index = 0;
+                memset(buffer, 0, sizeof(buffer));
+            }
+
+            // Si el buffer se llena sin recibir '#', lo reinicia para evitar desbordes
+            if (index >= 4) {
+                index = 0;
+                memset(buffer, 0, sizeof(buffer));
+                printf("Buffer reiniciado por desborde\n");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 void Tacometro(void *params) {
     int counter = 0;
     float vueltas = 0;
@@ -384,21 +457,25 @@ void Tacometro(void *params) {
         vTaskDelay(pdMS_TO_TICKS(1));  // respiro para evitar uso 100% CPU
     }
 }
+
 int main()
 {
     stdio_init_all();
     configurar_gpio();
+    init_uart();
+
     //INICIALIZACION DE LAS COLAS 
     q_codigo        = xQueueCreate(100 , sizeof(char[MAX_INPUT + 1])  );
     //q_vel_deseada   = xQueueCreate(10 , sizeof(VelData_t)            );
     q_tacometro = xQueueCreate(100 , sizeof(float) );
+    q_uart      = xQueueCreate(100 , sizeof(char[MAX_INPUT + 1])  );
 
     //INICIALIZACION DE LAS TAREAS 
     xTaskCreate(task_matrix     , "Matrix"      , 2 * configMINIMAL_STACK_SIZE  , NULL, 4, NULL);
     xTaskCreate(task_motor      , "Motor"       , configMINIMAL_STACK_SIZE *3   , NULL, 3, NULL);
     //xTaskCreate(task_lcd, "LCD",  configMINIMAL_STACK_SIZE, NULL, 1, NULL);
     xTaskCreate(Tacometro, "Tacometro", 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
-
+    xTaskCreate(task_bluetooth , "Bluetooth"   , 2 * configMINIMAL_STACK_SIZE  , NULL, 5, NULL);
 
     vTaskStartScheduler();
     while (true) {
