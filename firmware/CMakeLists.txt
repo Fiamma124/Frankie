@@ -34,6 +34,7 @@ project(firmware C CXX ASM)
 pico_sdk_init()
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../freertos ${CMAKE_BINARY_DIR}/freertos)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../lcd ${CMAKE_BINARY_DIR}/lcd)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../rtc ${CMAKE_BINARY_DIR}/rtc)
 # add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../bluetooth ${CMAKE_BINARY_DIR}/bluetooth)
 
 # Add executable. Default name is the project name, version 0.1
@@ -52,7 +53,8 @@ target_link_libraries(firmware
     pico_stdlib
     hardware_pwm
     freertos
-    lcd)
+    lcd
+    rtc)
 
 # Add the standard include files to the build
 target_include_directories(firmware PRIVATE
