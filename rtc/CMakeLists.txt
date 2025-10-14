@@ -12,6 +12,7 @@ target_link_libraries(rtc
     hardware_pwm
     hardware_clocks
     hardware_i2c
+    freertos
 )
 
 # Incluir las cabeceras de la biblioteca
