@@ -20,4 +20,5 @@ void ds1307_init(i2c_inst_t *i2c);
 bool ds1307_get_time(i2c_inst_t *i2c, ds1307_time_t *time);
 bool ds1307_set_time(i2c_inst_t *i2c, const ds1307_time_t *time);
 bool at24c32_read(i2c_inst_t *i2c, uint16_t addr, uint8_t *buf, size_t len);
+bool at24c32_write_log(i2c_inst_t *i2c, uint16_t addr, const char* recorrido);
 

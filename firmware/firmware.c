@@ -283,6 +283,7 @@ void task_bluetooth(void *params) {
     int index = 2;
     int cod_letter = 0 ;
 
+    static uint16_t eeprom_addr = 0;
     while (true) {
         if (uart_is_readable(UART_ID)) {
             char c = uart_getc(UART_ID);
@@ -310,21 +311,39 @@ void task_bluetooth(void *params) {
                 // Si la cadena es R#
                 if (index == 1 && buffer[0] == 'R') {
                     print_fecha_hora_rtc(i2c1);
+                    at24c32_write_log(i2c1, eeprom_addr, "R#");
+                    eeprom_addr += 48; // tamaño máximo de registro
                 }
                 // Si la cadena es M#
                 else if (index == 1 && buffer[0] == 'M') {
-                    uint8_t mem_buf[32];
-                    if (at24c32_read(i2c1, 0, mem_buf, sizeof(mem_buf))) {
-                        printf("\nEEPROM[0-31]:");
-                        for (int i = 0; i < 32; ++i) {
-                            if (mem_buf[i] == '\0') break;
-                            char c = (mem_buf[i] >= 32 && mem_buf[i] <= 126) ? mem_buf[i] : '.';
-                            putchar(c);
+                    // Imprimir todos los registros de log almacenados en la EEPROM
+                    const int registro_size = 48;
+                    uint8_t mem_buf[registro_size];
+                    uint16_t addr = 0;
+                    int registro_num = 0;
+                    printf("\n--- LOG EEPROM ---\n");
+                    while (addr + registro_size <= 4096) {
+                        if (!at24c32_read(i2c1, addr, mem_buf, registro_size)) {
+                            printf("Error leyendo EEPROM en registro %d\n", registro_num);
+                            break;
                         }
-                        printf("\n");
-                    } else {
-                        printf("Error leyendo EEPROM\n");
+                        // Si el primer byte es 0xFF o 0x00, consideramos que no hay más registros válidos
+                        if (mem_buf[0] == 0xFF || mem_buf[0] == 0x00) {
+                            break;
+                        }
+                        // Aseguramos nulo al final por si falta
+                        mem_buf[registro_size-1] = '\0';
+                        // Imprime la cadena hasta el primer nulo
+                        printf("%d: %s\n", registro_num+1, mem_buf);
+                        addr += registro_size;
+                        registro_num++;
                     }
+                    if (registro_num == 0) {
+                        printf("(Sin registros)\n");
+                    }
+                    printf("--- FIN LOG ---\n");
+                    at24c32_write_log(i2c1, eeprom_addr, "M#");
+                    eeprom_addr += 48;
                 }
                 // Verifica formato de comando normal
                 else if (cod_num == 1 && cod_letter==1) {
@@ -333,6 +352,8 @@ void task_bluetooth(void *params) {
                     //index = 2;
                     xQueueSend(q_uart , buffer , 0 );
                     printf("Ya paso por la cola \n");
+                    at24c32_write_log(i2c1, eeprom_addr, buffer);
+                    eeprom_addr += 48;
                     memset(buffer, 0, sizeof(buffer));
                     cod_num = 0; 
                     cod_letter = 0;
