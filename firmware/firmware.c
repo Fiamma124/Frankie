@@ -7,12 +7,14 @@
 #include "hardware/pwm.h"
 #include "string.h"
 #include "lcd.h"
+#include "hardware/i2c.h"
+#include "rtc.h"
 
 
 // MACROS
-// Eleccion de GPIO para SDA y SCL para el LCD
-#define SDA_GPIO    14
-#define SCL_GPIO    15
+// Eleccion de GPIO para SDA y SCL para el RTC
+#define SDA_RTC    2
+#define SCL_RTC    3
 // Pines para control de dirección y PWM
 #define MOTOR_M2_IN1 18
 #define MOTOR_M2_IN2 19
@@ -69,15 +71,6 @@ typedef struct {
     float v_left;
 } VelData_t;
 
-const uint FILA_PINS[FILAS] = {6, 7, 8, 9};
-const uint COLUMNA_PINS[COLUMNAS] = {10, 11, 12, 13};
-const char teclas[FILAS][COLUMNAS] = {
-    {'1', '2', '3', 'A'},
-    {'4', '5', '6', 'B'},
-    {'7', '8', '9', 'C'},
-    {'*', '0', '#', 'D'}
-};
-
 QueueHandle_t q_codigo;
 QueueHandle_t q_vel_deseada;
 
@@ -91,19 +84,7 @@ void configurar_gpio() {
     gpio_set_dir(IN_PIN_TACOMETRO_RIGHT, GPIO_IN);
     gpio_pull_down(IN_PIN_TACOMETRO_RIGHT);
 
-    //INICIALIZACION DEL TECLADO MATRICIAL
-    for (int i = 0; i < FILAS; i++) {
-        gpio_init(FILA_PINS[i]);
-        gpio_set_dir(FILA_PINS[i], GPIO_OUT);
-        gpio_put(FILA_PINS[i], 1);
-    }
-    for (int i = 0; i < COLUMNAS; i++) {
-        gpio_init(COLUMNA_PINS[i]);
-        gpio_set_dir(COLUMNA_PINS[i], GPIO_IN);
-        gpio_pull_up(COLUMNA_PINS[i]);
-    }
-    printf("Listo para leer el teclado 4x4...\n");
-
+    
     //INICIALIZACION DEL MOTOR
     //motor_init();
     //motor_set_direction(true);  
@@ -111,14 +92,14 @@ void configurar_gpio() {
     //CONFIUGRACION DEL DISPLAY
     i2c_init(i2c1, 100000);
     //Seteo la funcion
-    gpio_set_function(SDA_GPIO, GPIO_FUNC_I2C);
-    gpio_set_function(SCL_GPIO, GPIO_FUNC_I2C);
+    gpio_set_function(SDA_RTC, GPIO_FUNC_I2C);
+    gpio_set_function(SCL_RTC, GPIO_FUNC_I2C);
     // Habilito pull-ups
-    gpio_pull_up(SDA_GPIO);
-    gpio_pull_up(SCL_GPIO);
+    gpio_pull_up(SDA_RTC);
+    gpio_pull_up(SCL_RTC);
     //Inicializo el display
-    lcd_init(i2c1, 0x27 );
-    lcd_clear();
+    //lcd_init(i2c1, 0x27 );
+    //lcd_clear();
 }
 
 void init_uart() {
@@ -128,21 +109,7 @@ void init_uart() {
     gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART); 
     stdio_uart_init_full(uart0, BAUD_RATE, UART_TX_PIN, UART_RX_PIN);
 }
-char escanear_teclado() {
-    for (int f = 0; f < FILAS; f++) {
-        for (int i = 0; i < FILAS; i++)
-            gpio_put(FILA_PINS[i], i == f ? 0 : 1);
 
-        vTaskDelay(pdMS_TO_TICKS(30));  // estabilización rápida
-
-        for (int c = 0; c < COLUMNAS; c++) {
-            if (gpio_get(COLUMNA_PINS[c]) == 0) {
-                return teclas[f][c];
-            }
-        }
-    }
-    return 0;
-}
 void motor_init() {
     float clock = 125000000 ;
     float divider = clock / (PWM_FREQ * (255+1));
@@ -299,73 +266,16 @@ void task_motor(void *params) {
     }
 }
 
-void task_matrix(void *params) {
-    char buffer[MAX_INPUT + 1] = {0};
-    int index = 2;
-    char tecla_anterior = 0;
-    char tecla_actual = 0;
-    int cod_num = 0;
-    int cod_letter = 0 ;
-    
-
-    while (true) {
-        tecla_actual = escanear_teclado();
-        if (tecla_actual != 0 && tecla_actual != tecla_anterior) {
-            printf("Tecla presionada: %c\n", tecla_actual);
-
-            if (tecla_actual != '#') {
-                //
-                if (tecla_actual == '3' || tecla_actual == '6' || tecla_actual == '9') {
-                    buffer[0] = tecla_actual;
-                    cod_num = 1;
-                }else if (tecla_actual == 'A' || tecla_actual == 'B' || tecla_actual == 'C'|| tecla_actual == 'D') {
-                    buffer[1] = tecla_actual;
-                    cod_letter = 1 ;
-                }else {buffer[index++] = tecla_actual;}
-            }
-            
-            if (tecla_actual == '*') {
-                //index = 0;
-                memset(buffer, 0, sizeof(buffer));
-                printf("Buffer borrado");
-            }
-
-            if (tecla_actual == '#') {
-                if (cod_num == 1 && cod_letter==1){
-                    buffer[2] = '\0';
-                    printf("Ingresado: %s\n", buffer);
-                    //index = 2;
-                    xQueueSend(q_codigo , buffer , 0 );
-                    printf("Ya paso por la cola \n");
-                    memset(buffer, 0, sizeof(buffer));
-                    cod_num = 0; 
-                    cod_letter = 0;
-                }else {
-                    printf("Error: faltan datos antes de enviar.\n");
-                }
-                
-            }
-        }
-        tecla_anterior = tecla_actual;
-
-        vTaskDelay(pdMS_TO_TICKS(100)); 
+// Imprime la fecha y hora en formato DDMMAA-HH:MM usando el RTC
+void print_fecha_hora_rtc(i2c_inst_t *i2c) {
+    ds1307_time_t t;
+    if (ds1307_get_time(i2c, &t)) {
+        // Formato: DDMMAA-HH:MM
+        printf("%02d%02d%02d-%02d:%02d\n", t.day, t.month, t.year, t.hours, t.minutes);
+    } else {
+        printf("Error leyendo RTC\n");
     }
 }
-
-
-/*
-void task_lcd(void *params) {
-    char str_matrix[17] = {0};
-    char str_taco[17] = {0};
-    char matrix_input[MAX_INPUT + 1] = {0};
-    float taco_input = 0;
-    while (true) {
-        lcd_clear();
-        lcd_set_cursor(0, 0);
-        lcd_string("Hola mundo");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}*/
 
 void task_bluetooth(void *params) {
     char buffer[4] = {0}; // Donde se guardará el recorrido preseteado. Ej "1A#"
@@ -377,23 +287,47 @@ void task_bluetooth(void *params) {
         if (uart_is_readable(UART_ID)) {
             char c = uart_getc(UART_ID);
 
-           if (c != '#') {
-                //
+            if (c != '#') {
                 if (c == '1' || c == '2' || c == '3') {
                     buffer[0] = c;
                     cod_num = 1;
-                }else if (c == 'A' || c == 'B' || c == 'C'|| c == 'D') {
+                } else if (c == 'A' || c == 'B' || c == 'C'|| c == 'D') {
                     buffer[1] = c;
                     cod_letter = 1 ;
-                }else {buffer[index++] = c;}
+                } else if (c == 'R' || c == 'M') {
+                    buffer[0] = c;
+                    index = 1;
+                } else {
+                    buffer[index++] = c;
+                }
             }
 
             if (c == '#') {
                 buffer[index] = '\0';
                 printf("Secuencia completa recibida: %s\n", buffer);
 
-                // Verifica formato
-                    if (cod_num == 1 && cod_letter==1) {
+
+                // Si la cadena es R#
+                if (index == 1 && buffer[0] == 'R') {
+                    print_fecha_hora_rtc(i2c1);
+                }
+                // Si la cadena es M#
+                else if (index == 1 && buffer[0] == 'M') {
+                    uint8_t mem_buf[32];
+                    if (at24c32_read(i2c1, 0, mem_buf, sizeof(mem_buf))) {
+                        printf("\nEEPROM[0-31]:");
+                        for (int i = 0; i < 32; ++i) {
+                            if (mem_buf[i] == '\0') break;
+                            char c = (mem_buf[i] >= 32 && mem_buf[i] <= 126) ? mem_buf[i] : '.';
+                            putchar(c);
+                        }
+                        printf("\n");
+                    } else {
+                        printf("Error leyendo EEPROM\n");
+                    }
+                }
+                // Verifica formato de comando normal
+                else if (cod_num == 1 && cod_letter==1) {
                     buffer[2] = '\0';
                     printf("Ingresado: %s\n", buffer);
                     //index = 2;
@@ -402,7 +336,9 @@ void task_bluetooth(void *params) {
                     memset(buffer, 0, sizeof(buffer));
                     cod_num = 0; 
                     cod_letter = 0;
-                } else {
+                }
+                // Solo imprime 'Formato inválido' si no es R# ni M#
+                else if (!(index == 1 && (buffer[0] == 'R' || buffer[0] == 'M'))) {
                     printf("Formato inválido\n");
                 }
 
@@ -471,10 +407,10 @@ int main()
     q_uart      = xQueueCreate(100 , sizeof(char[MAX_INPUT + 1])  );
 
     //INICIALIZACION DE LAS TAREAS 
-    xTaskCreate(task_matrix     , "Matrix"      , 2 * configMINIMAL_STACK_SIZE  , NULL, 4, NULL);
-    xTaskCreate(task_motor      , "Motor"       , configMINIMAL_STACK_SIZE *3   , NULL, 3, NULL);
+    //xTaskCreate(task_matrix     , "Matrix"      , 2 * configMINIMAL_STACK_SIZE  , NULL, 4, NULL);
+   // xTaskCreate(task_motor      , "Motor"       , configMINIMAL_STACK_SIZE *3   , NULL, 3, NULL);
     //xTaskCreate(task_lcd, "LCD",  configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-    xTaskCreate(Tacometro, "Tacometro", 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
+   // xTaskCreate(Tacometro, "Tacometro", 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
     xTaskCreate(task_bluetooth , "Bluetooth"   , 2 * configMINIMAL_STACK_SIZE  , NULL, 5, NULL);
 
     vTaskStartScheduler();
@@ -482,3 +418,5 @@ int main()
         
     }
 }
+
+
