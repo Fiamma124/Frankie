@@ -38,10 +38,14 @@
     "raspberry-pi-pico.cmakePath": "${HOME}/.pico-sdk/cmake/v3.31.5/bin/cmake",
     "raspberry-pi-pico.ninjaPath": "${HOME}/.pico-sdk/ninja/v1.12.1/ninja",
     "files.associations": {
+<<<<<<< HEAD
         "stdio.h": "c",
         "stdlib.h": "c",
         "freertos.h": "c",
         "i2c.h": "c",
         "stdbool.h": "c"
+=======
+        "semphr.h": "c"
+>>>>>>> b81562d (Intetnado subir al git el PID)
     }
 }
