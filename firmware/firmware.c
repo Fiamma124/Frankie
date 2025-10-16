@@ -7,12 +7,8 @@
 #include "hardware/pwm.h"
 #include "string.h"
 #include "lcd.h"
-<<<<<<< HEAD
 #include "hardware/i2c.h"
 #include "rtc.h"
-=======
-#include "semphr.h"
->>>>>>> 2d86562 (Coordinacion de tareas funcionando BIEN POSTA FINAL FINAL AHORA SI)
 
 
 // MACROS
@@ -88,10 +84,6 @@ typedef struct {
     float v_outer;
 } VelData_t;
 
-<<<<<<< HEAD
-QueueHandle_t q_codigo;
-QueueHandle_t q_vel_deseada;
-=======
 const uint FILA_PINS[FILAS] = {6, 7, 8, 9};
 const uint COLUMNA_PINS[COLUMNAS] = {10, 11, 12, 13};
 const char teclas[FILAS][COLUMNAS] = {
@@ -107,7 +99,6 @@ const char teclas[FILAS][COLUMNAS] = {
 
 
 void on_uart_rx(void);
->>>>>>> 2d86562 (Coordinacion de tareas funcionando BIEN POSTA FINAL FINAL AHORA SI)
 
 void configurar_gpio() {
     //INICIALIZACION DE LOS TACOMETROS
@@ -153,18 +144,6 @@ void init_uart() {
     
 }
 
-<<<<<<< HEAD
-=======
-        vTaskDelay(pdMS_TO_TICKS(30));  // estabilización rápida
-
-        for (int c = 0; c < COLUMNAS; c++) {
-            if (gpio_get(COLUMNA_PINS[c]) == 0) {
-                return teclas[f][c];
-            }
-        }
-    }
-    return 0;
-}
 volatile static char rx_index = 0;
 volatile static char rx_buffer[MAX_INPUT];
 
@@ -180,7 +159,6 @@ void on_uart_rx() {
 }
 
 
->>>>>>> 2d86562 (Coordinacion de tareas funcionando BIEN POSTA FINAL FINAL AHORA SI)
 void motor_init() {
     float clock = 125000000 ;
     float divider = clock / (PWM_FREQ * (255+1));
@@ -498,10 +476,6 @@ void print_fecha_hora_rtc(i2c_inst_t *i2c) {
     }
 }
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 2d86562 (Coordinacion de tareas funcionando BIEN POSTA FINAL FINAL AHORA SI)
 void task_bluetooth(void *params) {
     char buffer[4] = {0}; // Donde se guardará el recorrido preseteado. Ej "1A#"
     int cod_num = 0;
@@ -510,16 +484,9 @@ void task_bluetooth(void *params) {
     char c;
 
     while (true) {
-<<<<<<< HEAD
-        if (uart_is_readable(UART_ID)) {
-            char c = uart_getc(UART_ID);
-
-            if (c != '#') {
-=======
         if (xQueueReceive(q_bluetooth_chars, &c, portMAX_DELAY)) {
            if (c != '#') {
                 //
->>>>>>> 2d86562 (Coordinacion de tareas funcionando BIEN POSTA FINAL FINAL AHORA SI)
                 if (c == '1' || c == '2' || c == '3') {
                     buffer[0] = c;
                     cod_num = 1;
@@ -682,12 +649,6 @@ int main()
 
     //INICIALIZACION DE LAS TAREAS 
     //xTaskCreate(task_matrix     , "Matrix"      , 2 * configMINIMAL_STACK_SIZE  , NULL, 4, NULL);
-<<<<<<< HEAD
-   // xTaskCreate(task_motor      , "Motor"       , configMINIMAL_STACK_SIZE *3   , NULL, 3, NULL);
-    //xTaskCreate(task_lcd, "LCD",  configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-   // xTaskCreate(Tacometro, "Tacometro", 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
-    xTaskCreate(task_bluetooth , "Bluetooth"   , 2 * configMINIMAL_STACK_SIZE  , NULL, 5, NULL);
-=======
     
     //xTaskCreate(task_lcd, "LCD",  configMINIMAL_STACK_SIZE, NULL, 1, NULL);
     xTaskCreate(task_PID_left       , "PID Left"        , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
@@ -696,7 +657,6 @@ int main()
     xTaskCreate(task_tacometro_left , "Tacometro Left"  , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
     xTaskCreate(task_tacometro_right, "Tacometro Right" , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
     xTaskCreate(task_bluetooth      , "Bluetooth"       , 2 * configMINIMAL_STACK_SIZE , NULL, 5, NULL);
->>>>>>> 2d86562 (Coordinacion de tareas funcionando BIEN POSTA FINAL FINAL AHORA SI)
 
     vTaskStartScheduler();
     while (true) {
