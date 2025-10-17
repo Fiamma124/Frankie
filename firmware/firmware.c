@@ -41,9 +41,9 @@
 #define VEL_01  97.0f
 #define VEL_02  76.5f
 #define VEL_03  57.9f
-#define CURVA_01 1.5f
-#define CURVA_02 1.0f
-#define CURVA_03 0.5f
+#define CURVA_01 0.75f
+#define CURVA_02 0.5f
+#define CURVA_03 0.25f
 #define RECTA 0.0f
 
 //Cosntantes del auto
@@ -74,29 +74,10 @@ QueueHandle_t q_vel_impuesta_right ;
 QueueHandle_t q_bluetooth_chars;
 QueueHandle_t q_codigo;
 
-SemaphoreHandle_t xsemPID_left_run ;
-SemaphoreHandle_t xsemPID_right_run ;
-SemaphoreHandle_t xsemPID_left_stop ;
-SemaphoreHandle_t xsemPID_right_stop ;
-
 typedef struct {
     float v_inner;
     float v_outer;
 } VelData_t;
-
-const uint FILA_PINS[FILAS] = {6, 7, 8, 9};
-const uint COLUMNA_PINS[COLUMNAS] = {10, 11, 12, 13};
-const char teclas[FILAS][COLUMNAS] = {
-    {'1', '2', '3', 'A'},
-    {'4', '5', '6', 'B'},
-    {'7', '8', '9', 'C'},
-    {'*', '0', '#', 'D'}
-};
-
-
-//TaskHandle_t handlePID_left ;
-//TaskHandle_t handlePID_right ;
-
 
 void on_uart_rx(void);
 
@@ -123,9 +104,7 @@ void configurar_gpio() {
     // Habilito pull-ups
     gpio_pull_up(SDA_RTC);
     gpio_pull_up(SCL_RTC);
-    //Inicializo el display
-    //lcd_init(i2c1, 0x27 );
-    //lcd_clear();
+  
 }
 
 void init_uart() {
@@ -337,6 +316,9 @@ void task_motor(void *params) {
         xQueueOverwrite(q_vel_impuesta_left ,  0 );
         xQueueOverwrite(q_vel_impuesta_right , 0  );
 
+        vel_pwm_inner = 0 ;
+        vel_pwm_outer = 0 ;
+
         memset(buffer, 0, sizeof(buffer));
         vTaskDelay(pdMS_TO_TICKS(1000));  // Reemplazo de vTaskDelay
         
@@ -378,16 +360,12 @@ void task_PID_right(void *params) {
                 
                 if (setpoint_raw != 0 ){
                     medida = medida_aux * PENDIENTE + ORDENADA;
-                    
-                }else if (setpoint_raw == 0 ){
-                    medida = 0 ;
-                }
                     error = setpoint - medida;
                     integral += error;   // integración con tiempo
                     derivada = (error - error_anterior) ;
                     salida = setpoint + (Kp * error + Ki * integral + Kd * derivada)    *   velocidad;
-                    //printf("RIGHT MOTOR \n Setpoint: %.2f | Medida: %.2f | Error: %.2f | Salida: %.2f| Integral: %.2f | Derivada: %.2f \n",
-                        //setpoint, medida, error, salida,integral,derivada);
+                    printf("RIGHT MOTOR \n Setpoint: %.2f | Medida: %.2f | Error: %.2f | Salida: %.2f| Integral: %.2f | Derivada: %.2f \n",
+                        setpoint, medida, error, salida, integral, derivada);
 
                     // Saturación de PWM
                     if (salida > 0 && salida < PWM_MIN) salida = PWM_MIN;
@@ -398,13 +376,19 @@ void task_PID_right(void *params) {
                     //xQueueSend(q_vel_impuesta, &salida_aux, portMAX_DELAY);
 
                     error_anterior = error;
+                    
+                }else if (setpoint_raw == 0 ){
+                    medida = 0 ;
+                    motor_set_speed(MOTOR_RIGHT,0);
+                }
+                    
 
                 //} else if  (setpoint_raw == 0 ){
-                    //motor_set_speed(MOTOR_RIGHT,0);
+                    //
                 //}
             
         //}
-        vTaskDelay(pdMS_TO_TICKS(250));  // 50 ms
+        vTaskDelay(pdMS_TO_TICKS(20));  // 50 ms
     
     }
 }
@@ -436,32 +420,37 @@ void task_PID_left(void *params) {
         
             xQueuePeek(q_vel_impuesta_left, &setpoint_raw, 0) ;
             setpoint = (float)setpoint_raw;
-            xQueueReceive(q_tacometro_left, &medida_aux, portMAX_DELAY);
+            xQueueReceive(q_tacometro_left, &medida_aux, 0);
             if (setpoint_raw != 0 ){
                 medida = medida_aux * PENDIENTE + ORDENADA;
-                
-            }else if (setpoint_raw == 0 ){
-                medida = 0 ;
-            }
                 error = setpoint - medida;
                 integral += error;   // integración con tiempo
                 derivada = (error - error_anterior) ;
                 salida = setpoint + (Kp * error + Ki * integral + Kd * derivada)    *   velocidad;
-                //printf("LEFT MOTOR \n Setpoint: %.2f | Medida: %.2f | Error: %.2f | Salida: %.2f| Integral: %.2f | Derivada: %.2f \n",
-                    //setpoint, medida, error, salida,integral,derivada);
+                printf("LEFT MOTOR \n Setpoint: %.2f | Medida: %.2f | Error: %.2f | Salida: %.2f| Integral: %.2f | Derivada: %.2f \n",
+                    setpoint, medida, error, salida, integral, derivada);
 
                 // Saturación de PWM
                 if (salida > 0 && salida < PWM_MIN) salida = PWM_MIN;
                 if (salida > 255) salida = 255;
                 
+                error_anterior = error;
+                
                 uint16_t salida_aux = (uint16_t)salida; 
                 motor_set_speed(MOTOR_LEFT,salida);
+                
+            }else if (setpoint_raw == 0 ){
+                medida = 0 ;
+
+                motor_set_speed(MOTOR_LEFT,0);
+            }
+                
                 //xQueueSend(q_vel_impuesta, &salida_aux, portMAX_DELAY);
 
-                error_anterior = error;
+                
     
             
-        vTaskDelay(pdMS_TO_TICKS(250));  // 50 ms
+        vTaskDelay(pdMS_TO_TICKS(20));  // 50 ms
     }
 }
 
@@ -483,6 +472,8 @@ void task_bluetooth(void *params) {
     int cod_letter = 0 ;
     char c;
 
+    static uint16_t eeprom_addr = 0;
+
     while (true) {
         if (xQueueReceive(q_bluetooth_chars, &c, portMAX_DELAY)) {
            if (c != '#') {
@@ -493,7 +484,7 @@ void task_bluetooth(void *params) {
                 } else if (c == 'A' || c == 'B' || c == 'C'|| c == 'D') {
                     buffer[1] = c;
                     cod_letter = 1 ;
-                } else if (c == 'R' || c == 'M') {
+                } else if (c == 'R' || c == 'M' || c == 'E') {
                     buffer[0] = c;
                     index = 1;
                 } else {
@@ -509,20 +500,50 @@ void task_bluetooth(void *params) {
                 // Si la cadena es R#
                 if (index == 1 && buffer[0] == 'R') {
                     print_fecha_hora_rtc(i2c1);
+                    at24c32_write_log(i2c1, eeprom_addr, "R#");
+                    eeprom_addr += 48; // tamaño máximo de registro
                 }
                 // Si la cadena es M#
                 else if (index == 1 && buffer[0] == 'M') {
-                    uint8_t mem_buf[32];
-                    if (at24c32_read(i2c1, 0, mem_buf, sizeof(mem_buf))) {
-                        printf("\nEEPROM[0-31]:");
-                        for (int i = 0; i < 32; ++i) {
-                            if (mem_buf[i] == '\0') break;
-                            char c = (mem_buf[i] >= 32 && mem_buf[i] <= 126) ? mem_buf[i] : '.';
-                            putchar(c);
+                    // Imprimir todos los registros de log almacenados en la EEPROM
+                    const int registro_size = 48;
+                    uint8_t mem_buf[registro_size];
+                    uint16_t addr = 0;
+                    int registro_num = 0;
+                    printf("\n--- LOG EEPROM ---\n");
+                    while (addr + registro_size <= 4096) {
+                        if (!at24c32_read(i2c1, addr, mem_buf, registro_size)) {
+                            printf("Error leyendo EEPROM en registro %d\n", registro_num);
+                            break;
                         }
-                        printf("\n");
+                        // Si el primer byte es 0xFF o 0x00, consideramos que no hay más registros válidos
+                        if (mem_buf[0] == 0xFF || mem_buf[0] == 0x00) {
+                            break;
+                        }
+                        // Aseguramos nulo al final por si falta
+                        mem_buf[registro_size-1] = '\0';
+                        // Imprime la cadena hasta el primer nulo
+                        printf("%d: %s\n", registro_num+1, mem_buf);
+                        addr += registro_size;
+                        registro_num++;
+                    }
+                    if (registro_num == 0) {
+                        printf("(Sin registros)\n");
+                    }
+                    printf("--- FIN LOG ---\n");
+                    at24c32_write_log(i2c1, eeprom_addr, "M#");
+                    eeprom_addr += 48;
+                }
+                // Si la cadena es E# -> borrar EEPROM
+                else if (index == 1 && buffer[0] == 'E') {
+                    printf("Comando E# recibido: borrando EEPROM...\n");
+                    bool ok = eeprom_erase(i2c1);
+                    if (ok) {
+                        printf("Borrado completado, registrando evento E#\n");
+                        at24c32_write_log(i2c1, eeprom_addr, "E#");
+                        eeprom_addr += 48;
                     } else {
-                        printf("Error leyendo EEPROM\n");
+                        printf("Borrado fallido: no se registrará el evento E# en EEPROM\n");
                     }
                 }
                 // Verifica formato de comando normal
@@ -530,6 +551,8 @@ void task_bluetooth(void *params) {
                     buffer[2] = '\0';
                     printf("Ingresado: %s\n", buffer);
                     //index = 2;
+                    at24c32_write_log(i2c1, eeprom_addr, buffer);
+                    eeprom_addr += 48;
                     xQueueSend(q_uart , buffer , portMAX_DELAY );
                     memset(buffer, 0, sizeof(buffer));
                     cod_num = 0; 
@@ -641,11 +664,6 @@ int main()
     q_tacometro_right       = xQueueCreate(1 , sizeof(int) );
     q_uart                  = xQueueCreate(1 , sizeof(char[MAX_INPUT + 1])  );
     q_bluetooth_chars       = xQueueCreate(MAX_INPUT, sizeof(char));
-
-    xsemPID_left_run =  xSemaphoreCreateBinary();
-    xsemPID_right_run =  xSemaphoreCreateBinary();
-    xsemPID_left_stop =  xSemaphoreCreateBinary();
-    xsemPID_right_stop =  xSemaphoreCreateBinary();
 
     //INICIALIZACION DE LAS TAREAS 
     //xTaskCreate(task_matrix     , "Matrix"      , 2 * configMINIMAL_STACK_SIZE  , NULL, 4, NULL);
