@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include <stdlib.h>
@@ -30,11 +31,6 @@
 // Cambiar velocidad (0 a 255)
 #define MOTOR_LEFT      1
 #define MOTOR_RIGHT     2
-//Contastante de conversion de velocidad a PWN
-#define PENDIENTE   1.2045f
-#define ORDENADA    127.43f
-//const float  PENDIENTE = 72.36 ;
-//const float ORDENADA = 141.38 ;
 #define PI 3.14f
 //Modos 
 //SEGUN EL MODO, PONEMOS LA VELOCIDAD
@@ -46,9 +42,10 @@
 #define CURVA_03 0.25f
 #define RECTA 0.0f
 
-//Cosntantes del auto
-#define RADIUS 0.134f //radio entre el centro de las ruedas en m
-#define R_WHEEL 0.0325f
+//Constantes del auto
+#define ANCHO 0.134f // Mitad del ancho de las ruedas
+#define R_WHEEL 0.0325f // Radio de las ruedas
+
 //Configuración del teclado matricial
 #define FILAS 4
 #define COLUMNAS 4
@@ -60,8 +57,12 @@
 #define UART_RX_PIN 17
 #define BAUD_RATE 115200
 
-#define PID_ACTIVADO 0
-#define PID_DESACTIVADO 0
+//#define PWMBASE 245    
+// Prototipo para evitar error de declaración
+void task_recto(void *params);
+void task_curva(void *params);
+void task_tune_left_twiddle(void *params);
+void task_tune_right_twiddle(void *params);
 
 
 //Defino mi cola
@@ -200,260 +201,6 @@ void motor_set_speed(uint8_t motor, uint16_t speed) {
 }
 
 
-void task_motor(void *params) {
-    motor_init();
-    motor_set_direction(MOTOR_LEFT,true);  // Sentido "hacia adelante"
-    motor_set_direction(MOTOR_RIGHT,true);
-    uint16_t speed_left = 255;
-    uint16_t speed_right = 251;
-    unsigned int sentido = 0;
-
-    char buffer[MAX_INPUT + 1] = {0};
-    float linear_speed = 0;
-    float radius = 0;
-
-    VelData_t diff_vel ;
-    uint16_t vel_pwm_inner = 0 ;
-    uint16_t vel_pwm_outer = 0 ;
-    float aux_vel = 0 ;
-
-    int set_time ;
-    TickType_t start_tick = xTaskGetTickCount();  // tiempo de referencia
-    TickType_t aux_tick = 0 ;
-
-    motor_set_speed(MOTOR_LEFT,0);
-    motor_set_speed(MOTOR_RIGHT,0);
-
-    while (1) {
-        xQueueReceive(q_uart, &buffer, portMAX_DELAY );
-            
-        if      (buffer[0]=='1'){linear_speed=VEL_01;}
-        else if (buffer[0]=='2'){linear_speed=VEL_02;}
-        else if (buffer[0]=='3'){linear_speed=VEL_03;}
-            
-        if      (buffer[1]=='A'){radius=CURVA_01;}
-        else if (buffer[1]=='B'){radius=CURVA_02;}
-        else if (buffer[1]=='C'){radius=CURVA_03;}
-        else if (buffer[1]=='D'){radius=RECTA;}
-
-
-        if (buffer[1] == 'A' || buffer[1] == 'B' || buffer[1] == 'C' ){
-            //PASA DE ACTIVACIONES A VUELTAS CON (lineer_speed/21)
-            //el 2*PI lo pasa a velocidad angular y el R_WHEEL a velocidad lineal
-            start_tick = xTaskGetTickCount() ;
-            aux_tick = start_tick ;
-            printf("Ticks INICIALES: %u\n", (unsigned int)start_tick);
-            
-            aux_vel = (linear_speed / 21) * 2 * PI * R_WHEEL;
-            set_time =  1000 * 2 * PI * radius / aux_vel;
-
-            diff_vel.v_outer     = linear_speed * (1 + RADIUS / ( 2 * radius ) ) ;
-            diff_vel.v_inner    = linear_speed * (1 - RADIUS / ( 2 * radius ) ) ;
-
-            vel_pwm_inner = diff_vel.v_inner * PENDIENTE + ORDENADA;
-            vel_pwm_outer = diff_vel.v_outer * PENDIENTE + ORDENADA;
-
-            printf("Velocidad: %.2f | Radio: %.2f | Inner: %.2f | Outer: %.2f | Time: %d \n",
-                linear_speed, radius , diff_vel.v_outer , diff_vel.v_inner , set_time);
-
-            xQueueOverwrite(q_vel_impuesta_left , &vel_pwm_outer );
-            xQueueOverwrite(q_vel_impuesta_right , &vel_pwm_outer  );
-
-            vTaskDelay(pdMS_TO_TICKS(set_time/4 ));
-
-            // %%%%%%%%%%%%%%%%%%%% PRIMER SET %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-            xQueueOverwrite(q_vel_impuesta_left , &vel_pwm_outer  );
-            xQueueOverwrite(q_vel_impuesta_right , &vel_pwm_inner  ); 
-
-            start_tick = xTaskGetTickCount() - aux_tick ;
-            printf("Ticks PRIMER: %u\n", (unsigned int)start_tick);
-
-            vTaskDelay(pdMS_TO_TICKS(set_time/4 ));
-
-            // %%%%%%%%%%%%%%%%%%%% SEGUNDO SET %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-            xQueueOverwrite(q_vel_impuesta_left , &vel_pwm_inner  );
-            xQueueOverwrite(q_vel_impuesta_right , &vel_pwm_outer  );
-
-            start_tick = xTaskGetTickCount() - aux_tick ;
-            printf("Ticks SEGUNDO: %u\n", (unsigned int)start_tick);
-
-            vTaskDelay(pdMS_TO_TICKS(set_time/2));
-            
-            // %%%%%%%%%%%%%%%%%%%% TERCER SET %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-            xQueueOverwrite(q_vel_impuesta_left , &vel_pwm_outer  );
-            xQueueOverwrite(q_vel_impuesta_right , &vel_pwm_inner );
-
-            start_tick = xTaskGetTickCount() - aux_tick ;
-            printf("Ticks TERCER: %u\n", (unsigned int)start_tick);
-
-            vTaskDelay(pdMS_TO_TICKS(set_time/4));
-
-            // %%%%%%%%%%%%%%%%%%%% CUARTO SET %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-        // TRAYECTORIA RECTA
-        }else if (buffer[1]=='D'){
-            diff_vel.v_inner     = linear_speed  ;
-            diff_vel.v_outer     = linear_speed  ;
-
-            vel_pwm_inner = diff_vel.v_inner * PENDIENTE + ORDENADA;
-            vel_pwm_outer = diff_vel.v_outer * PENDIENTE + ORDENADA;
-
-            xQueueOverwrite(q_vel_impuesta_left , &vel_pwm_outer  );
-            xQueueOverwrite(q_vel_impuesta_right , &vel_pwm_inner  );
-
-            vTaskDelay(pdMS_TO_TICKS(5000));
-        }
-            
-
-        printf("Velocidad: %.2f | Radio: %.2f | Inner: %.2f | Outer: %.2f | Time: %d \n",
-            linear_speed, radius , diff_vel.v_outer , diff_vel.v_inner , set_time);
-
-        printf("vel_pwm_inner = %hu, vel_pwm_outer = %hu\n", vel_pwm_inner, vel_pwm_outer); 
-
-        xQueueOverwrite(q_vel_impuesta_left ,  0 );
-        xQueueOverwrite(q_vel_impuesta_right , 0  );
-
-        vel_pwm_inner = 0 ;
-        vel_pwm_outer = 0 ;
-
-        memset(buffer, 0, sizeof(buffer));
-        vTaskDelay(pdMS_TO_TICKS(1000));  // Reemplazo de vTaskDelay
-        
-    }
-}
-void task_PID_right(void *params) {
-    uint16_t setpoint_raw = 0;
-    float setpoint = 0.0;
-    float medida = 0.0;
-    int medida_aux = 0;
-
-    float error = 0, error_anterior = 0;
-    float integral = 0;
-    float salida = 0;
-    uint32_t cmd = PID_DESACTIVADO;  // recibirá las notificaciones
-
-    // Constantes iniciales (ajustables)
-    const float dt = 0.05; // 50 ms -> 20 Hz
-    const float Kp = 0.75;    // suficiente para superar el umbral de 200
-    const float Ki = 0.01;   // pequeña integración para que alcance el setpoint sin oscilar
-    const float Kd = 0.05;       // derivativa (pequeña para suavizar)
-    const float velocidad = 0.5; 
-
-    float derivada = 0;
-    const float PWM_MIN = 140.0;  // mínimo necesario para que el motor arranque
-
-    while (1) {
-        // Recibir nueva referencia
-        //if (xQueueReceive(q_vel_impuesta_right, &setpoint_raw, 0) == pdTRUE) {
-        //xTaskNotifyWait(0, 0, &cmd, portMAX_DELAY); 
-        //if (cmd == PID_ACTIVADO){
-
-            //printf ("PID DERECHO ACTIVADO\n");
-
-                xQueuePeek(q_vel_impuesta_right, &setpoint_raw, 0);
-                xQueueReceive(q_tacometro_right, &medida_aux, 0);
-                //if (setpoint_raw != 0 ){
-                setpoint = (float)setpoint_raw;
-                
-                if (setpoint_raw != 0 ){
-                    medida = medida_aux * PENDIENTE + ORDENADA;
-                    error = setpoint - medida;
-                    integral += error;   // integración con tiempo
-                    derivada = (error - error_anterior) ;
-                    salida = setpoint + (Kp * error + Ki * integral + Kd * derivada)    *   velocidad;
-                    printf("RIGHT MOTOR \n Setpoint: %.2f | Medida: %.2f | Error: %.2f | Salida: %.2f| Integral: %.2f | Derivada: %.2f \n",
-                        setpoint, medida, error, salida, integral, derivada);
-
-                    // Saturación de PWM
-                    if (salida > 0 && salida < PWM_MIN) salida = PWM_MIN;
-                    if (salida > 255) salida = 255;
-                    
-                    uint16_t salida_aux = (uint16_t)salida; 
-                    motor_set_speed(MOTOR_RIGHT,salida);
-                    //xQueueSend(q_vel_impuesta, &salida_aux, portMAX_DELAY);
-
-                    error_anterior = error;
-                    
-                }else if (setpoint_raw == 0 ){
-                    medida = 0 ;
-                    motor_set_speed(MOTOR_RIGHT,0);
-                }
-                    
-
-                //} else if  (setpoint_raw == 0 ){
-                    //
-                //}
-            
-        //}
-        vTaskDelay(pdMS_TO_TICKS(20));  // 50 ms
-    
-    }
-}
-
-
-void task_PID_left(void *params) {
-    uint16_t setpoint_raw = 0;
-    float setpoint = 0.0;
-    float medida = 0.0;
-    int medida_aux = 0;
-
-    float error = 0, error_anterior = 0;
-    float integral = 0;
-    float salida = 0;
-
-    // Constantes iniciales (ajustables)
-    const float dt = 0.05; // 50 ms -> 20 Hz
-    const float Kp = 0.75;    // suficiente para superar el umbral de 200
-    const float Ki = 0.01;   // pequeña integración para que alcance el setpoint sin oscilar
-    const float Kd = 0.05;       // derivativa (pequeña para suavizar)
-    const float velocidad = 0.5; 
-
-    float derivada = 0;
-    const float PWM_MIN = 140.0;  // mínimo necesario para que el motor arranque
-
-    while (1) {
-
-        // Recibir nueva referencia
-        
-            xQueuePeek(q_vel_impuesta_left, &setpoint_raw, 0) ;
-            setpoint = (float)setpoint_raw;
-            xQueueReceive(q_tacometro_left, &medida_aux, 0);
-            if (setpoint_raw != 0 ){
-                medida = medida_aux * PENDIENTE + ORDENADA;
-                error = setpoint - medida;
-                integral += error;   // integración con tiempo
-                derivada = (error - error_anterior) ;
-                salida = setpoint + (Kp * error + Ki * integral + Kd * derivada)    *   velocidad;
-                printf("LEFT MOTOR \n Setpoint: %.2f | Medida: %.2f | Error: %.2f | Salida: %.2f| Integral: %.2f | Derivada: %.2f \n",
-                    setpoint, medida, error, salida, integral, derivada);
-
-                // Saturación de PWM
-                if (salida > 0 && salida < PWM_MIN) salida = PWM_MIN;
-                if (salida > 255) salida = 255;
-                
-                error_anterior = error;
-                
-                uint16_t salida_aux = (uint16_t)salida; 
-                motor_set_speed(MOTOR_LEFT,salida);
-                
-            }else if (setpoint_raw == 0 ){
-                medida = 0 ;
-
-                motor_set_speed(MOTOR_LEFT,0);
-            }
-                
-                //xQueueSend(q_vel_impuesta, &salida_aux, portMAX_DELAY);
-
-                
-    
-            
-        vTaskDelay(pdMS_TO_TICKS(20));  // 50 ms
-    }
-}
-
 // Imprime la fecha y hora en formato DDMMAA-HH:MM usando el RTC
 void print_fecha_hora_rtc(i2c_inst_t *i2c) {
     ds1307_time_t t;
@@ -484,7 +231,7 @@ void task_bluetooth(void *params) {
                 } else if (c == 'A' || c == 'B' || c == 'C'|| c == 'D') {
                     buffer[1] = c;
                     cod_letter = 1 ;
-                } else if (c == 'R' || c == 'M' || c == 'E') {
+                } else if (c == 'R' || c == 'M' || c == 'E' || c == 'P' || c == 'N' || c == 'Y') {
                     buffer[0] = c;
                     index = 1;
                 } else {
@@ -503,8 +250,21 @@ void task_bluetooth(void *params) {
                     at24c32_write_log(i2c1, eeprom_addr, "R#");
                     eeprom_addr += 48; // tamaño máximo de registro
                 }
-                // Si la cadena es M#
-                else if (index == 1 && buffer[0] == 'M') {
+                  if (index == 1 && buffer[0] == 'M') {
+                    // Imprimir menú de comandos Bluetooth
+                    printf("\n--- MENÚ DE COMANDOS BLUETOOTH ---\n");
+                    printf("R#  - Registrar fecha y hora RTC en EEPROM\n");
+                    printf("L#  - Mostrar registros de log en EEPROM\n");
+                    printf("E#  - Borrar toda la EEPROM\n");
+                    printf("N#  - Ejecutar autotuning PID (Twiddle)\n");
+                    printf("Y#  - Leer PID óptimos guardados\n");
+                    printf("P#  - Guardar comando personalizado\n");
+                    printf("[1-3][A-D]# - Ejecutar recorrido (ej: 1A#, 2B#)\n");
+                    printf("------------------------------------\n");
+                }
+
+                // Si la cadena es L#
+                else if (index == 1 && buffer[0] == 'L') {
                     // Imprimir todos los registros de log almacenados en la EEPROM
                     const int registro_size = 48;
                     uint8_t mem_buf[registro_size];
@@ -546,6 +306,60 @@ void task_bluetooth(void *params) {
                         printf("Borrado fallido: no se registrará el evento E# en EEPROM\n");
                     }
                 }
+                // Si la cadena es N#
+                if (index == 1 && buffer[0] == 'N') {
+                    buffer[2] = '\0';
+                    printf("Ingresado: %s\n", buffer);
+                    //index = 2;
+                    at24c32_write_log(i2c1, eeprom_addr, buffer);
+                    eeprom_addr += 48;
+                    // Tareas de autotuning PID (ejecutar solo cuando quieras calibrar)
+                    xTaskCreate(task_tune_left_twiddle, "TuneLeft", 2 * configMINIMAL_STACK_SIZE, NULL, 6, NULL);
+                    xTaskCreate(task_tune_right_twiddle, "TuneRight", 2 * configMINIMAL_STACK_SIZE, NULL, 6, NULL);
+                    memset(buffer, 0, sizeof(buffer));
+                    cod_num = 0; 
+                    cod_letter = 0;
+                }
+                // Si la cadena es Y#
+                if (index == 1 && buffer[0] == 'Y') {
+                    // Leer PID guardados en EEPROM (LEFT)
+                    char pidl_buf[48] = {0};
+                    float Kp_left = 0, Ki_left = 0, Kd_left = 0;
+                    if (at24c32_read(i2c1, 0x100, (uint8_t*)pidl_buf, sizeof(pidl_buf))) {
+                        if (strncmp(pidl_buf, "PIDL:", 5) == 0) {
+                            sscanf(pidl_buf+5, "%f,%f,%f", &Kp_left, &Ki_left, &Kd_left);
+                            printf("[EEPROM] PID LEFT: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", Kp_left, Ki_left, Kd_left);
+                        } else {
+                            printf("[EEPROM] PID LEFT: No guardado\n");
+                        }
+                    } else {
+                        printf("[EEPROM] PID LEFT: Error de lectura\n");
+                    }
+                    // Leer PID guardados en EEPROM (RIGHT)
+                    char pidr_buf[48] = {0};
+                    float Kp_right = 0, Ki_right = 0, Kd_right = 0;
+                    if (at24c32_read(i2c1, 0x140, (uint8_t*)pidr_buf, sizeof(pidr_buf))) {
+                        if (strncmp(pidr_buf, "PIDR:", 5) == 0) {
+                            sscanf(pidr_buf+5, "%f,%f,%f", &Kp_right, &Ki_right, &Kd_right);
+                            printf("[EEPROM] PID RIGHT: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", Kp_right, Ki_right, Kd_right);
+                        } else {
+                            printf("[EEPROM] PID RIGHT: No guardado\n");
+                        }
+                    } else {
+                        printf("[EEPROM] PID RIGHT: Error de lectura\n");
+                    }
+                }
+                // Si la cadena es P#
+                if (index == 1 && buffer[0] == 'P') {
+                    buffer[2] = '\0';
+                    printf("Ingresado: %s\n", buffer);
+                    //index = 2;
+                    at24c32_write_log(i2c1, eeprom_addr, buffer);
+                    eeprom_addr += 48;
+                    memset(buffer, 0, sizeof(buffer));
+                    cod_num = 0; 
+                    cod_letter = 0;
+                }
                 // Verifica formato de comando normal
                 else if (cod_num == 1 && cod_letter==1) {
                     buffer[2] = '\0';
@@ -554,13 +368,19 @@ void task_bluetooth(void *params) {
                     at24c32_write_log(i2c1, eeprom_addr, buffer);
                     eeprom_addr += 48;
                     xQueueSend(q_uart , buffer , portMAX_DELAY );
+                    if (buffer[1] == 'D') {
+                        xTaskCreate(task_recto, "Recto", 2 * configMINIMAL_STACK_SIZE, NULL, 3, NULL);
+                    }
+                    else if (buffer[1] == 'A' || buffer[1] == 'B' || buffer[1] == 'C') {
+                        xTaskCreate(task_curva, "Curva", 2 * configMINIMAL_STACK_SIZE, NULL, 3, NULL);
+                    }
                     memset(buffer, 0, sizeof(buffer));
                     cod_num = 0; 
                     cod_letter = 0;
                 }
                 // Solo imprime 'Formato inválido' si no es R# ni M#
-                else if (!(index == 1 && (buffer[0] == 'R' || buffer[0] == 'M'))) {
-                    printf("Formato inválido\n");
+                else if (!(index == 1 && (buffer[0] == 'R' || buffer[0] == 'M' || buffer[0] == 'E' || buffer[0] == 'N'))) {
+                    //printf("Formato inválido\n");
                 }
 
                 // Reinicia el buffer y el índice después de procesar la cadena
@@ -583,15 +403,13 @@ void task_tacometro_right(void *params) {
     float vueltas = 0;
     int estado_anterior = gpio_get(IN_PIN_TACOMETRO_RIGHT);
     char str[16];
+    float vel_derecha = 0;
 
     TickType_t start_tick = xTaskGetTickCount();  // tiempo de referencia
-    const TickType_t periodo = pdMS_TO_TICKS(1000);  // 1 segundo
-
-
+    const TickType_t periodo = pdMS_TO_TICKS(200);  // 200 ms
 
     while (true) {
         int estado_actual = gpio_get(IN_PIN_TACOMETRO_RIGHT);
-
         // Detectar cambio de estado (flanco de subida)
         if (estado_actual != estado_anterior) {
             estado_anterior = estado_actual;
@@ -603,10 +421,12 @@ void task_tacometro_right(void *params) {
 
         // ¿Pasó 1 segundo?
         if ((xTaskGetTickCount() - start_tick) >= periodo) {
-            vueltas = counter / 21.0f;
-            //printf("Activaciones por segundo DER: %d\n", counter);
-            //printf("Vueltas por segundo: %.2f\n", vueltas);
-            xQueueOverwrite(q_tacometro_right , &counter  );
+            vueltas = counter / 20.0f;
+            vel_derecha = vueltas * 2 * PI * R_WHEEL; // m/s
+            
+            xQueueOverwrite(q_tacometro_right , &vel_derecha  );
+            xQueuePeek(q_tacometro_right, &vel_derecha, 0);
+            //printf("Vel Der: %.3f [m/s], counter: %d, vueltas: %.2f\n", vel_derecha, counter, vueltas);
             counter = 0;
             vueltas = 0;
             start_tick = xTaskGetTickCount();  // reinicio del conteo
@@ -615,14 +435,16 @@ void task_tacometro_right(void *params) {
         vTaskDelay(pdMS_TO_TICKS(1));  // respiro para evitar uso 100% CPU
     }
 }
+
 void task_tacometro_left(void *params) {
     int counter = 0;
     float vueltas = 0;
     int estado_anterior = gpio_get(IN_PIN_TACOMETRO_LEFT);
     char str[16];
+    float vel_izquierda = 0;
 
     TickType_t start_tick = xTaskGetTickCount();  // tiempo de referencia
-    const TickType_t periodo = pdMS_TO_TICKS(1000);  // 1 segundo
+    const TickType_t periodo = pdMS_TO_TICKS(200);  // 200 ms
 
     while (true) {
         int estado_actual = gpio_get(IN_PIN_TACOMETRO_LEFT);
@@ -637,10 +459,11 @@ void task_tacometro_left(void *params) {
 
         // ¿Pasó 1 segundo?
         if ((xTaskGetTickCount() - start_tick) >= periodo) {
-            vueltas = counter / 21.0f;
-            //printf("Activaciones por segundo IZQ: %d\n", counter);
-            //printf("Vueltas por segundo: %.2f\n", vueltas);
-            xQueueOverwrite(q_tacometro_left , &counter );
+            vueltas = counter / 20.0f;
+            vel_izquierda = vueltas * 2 * PI * R_WHEEL; // m/s
+            xQueueOverwrite(q_tacometro_left , &vel_izquierda );
+            xQueuePeek(q_tacometro_left, &vel_izquierda, 0);
+            //printf("Vel Izq: %.3f [m/s], counter: %d, vueltas: %.2f\n", vel_izquierda, counter, vueltas);
             counter = 0;
             vueltas = 0;
             start_tick = xTaskGetTickCount();  // reinicio del conteo
@@ -650,18 +473,476 @@ void task_tacometro_left(void *params) {
     }
 }
 
+
+void task_recto(void *params) {
+    const uint32_t tiempo_ms = 10000; // 4 segundos
+    
+    // PID para cada motor
+    // Izquierdo
+    const float Kp_left = 6.0f;
+    const float Ki_left = 0.0f;
+    const float Kd_left = 0.0f;
+    float error_left = 0, error_left_prev = 0, integral_left = 0, derivada_left = 0;
+    // Derecho
+    const float Kp_right = 4.0f;
+    const float Ki_right = 0.0f;
+    const float Kd_right = 0.0f;
+    float error_right = 0, error_right_prev = 0, integral_right = 0, derivada_right = 0;
+    float velocidad_left = 0, velocidad_right = 0;
+    float pid_left = 0, pid_right = 0;
+    // Valores base
+    uint16_t pwm_left = 180;
+    uint16_t pwm_right = 180;
+    uint16_t PWMBASE = 180;
+    // Setpoints de velocidad para cada motor (m/s)
+    float setpoint_left = 0.2f;
+    float setpoint_right = 0.2f;
+    char cmd_buffer[MAX_INPUT + 1] = {0};
+    // Espera y lee el comando desde la cola q_uart
+    if (xQueueReceive(q_uart, &cmd_buffer, portMAX_DELAY)) {
+        switch (cmd_buffer[0]) {
+            case '1':
+                setpoint_left = 0.2f;
+                setpoint_right = 0.2f;
+                PWMBASE = 180;
+                break;
+            case '2':
+                setpoint_left = 0.6f;
+                setpoint_right = 0.6f;
+                PWMBASE = 210;
+                break;
+            case '3':
+                setpoint_left = 1.0f;
+                setpoint_right = 1.0f;
+                PWMBASE = 240;
+                break;
+            default:
+                setpoint_left = 0.2f;
+                setpoint_right = 0.2f;
+                PWMBASE = 180;
+                break;
+        }
+    }
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t now = start;
+    const TickType_t periodo = pdMS_TO_TICKS(200); // 200 ms de ciclo PID
+    const float dt = 0.2f; // 200 ms en segundos
+
+    while ((now - start) < pdMS_TO_TICKS(tiempo_ms)) {
+        // Leer velocidad real calculada por la tarea tacómetro
+        xQueueReceive(q_tacometro_left, &velocidad_left, 0);
+        xQueueReceive(q_tacometro_right, &velocidad_right, 0);
+
+        // PID izquierdo
+        error_left = setpoint_left - velocidad_left;
+        integral_left += error_left * dt;
+        derivada_left = (error_left - error_left_prev) / dt;
+        pid_left = Kp_left * error_left + Ki_left * integral_left + Kd_left * derivada_left;
+        printf("PID Left: %.3f (e=%.3f, i=%.3f, d=%.3f)\n", pid_left, error_left, integral_left, derivada_left);
+        // PID derecho
+        error_right = setpoint_right - velocidad_right;
+        integral_right += error_right * dt;
+        derivada_right = (error_right - error_right_prev) / dt;
+        pid_right = Kp_right * error_right + Ki_right * integral_right + Kd_right * derivada_right;
+        printf("PID Right: %.3f (e=%.3f, i=%.3f, d=%.3f)\n", pid_right, error_right, integral_right, derivada_right);
+        // Ajustar PWM de cada motor
+        pwm_left = PWMBASE + (int16_t)pid_left;
+        pwm_right = PWMBASE + (int16_t)pid_right;
+
+        if (pwm_left > 255) pwm_left = 255;
+        if (pwm_left < 0) pwm_left = 0;
+        if (pwm_right > 255) pwm_right = 255;
+        if (pwm_right < 0) pwm_right = 0;
+
+        printf("L: v=%.3f, e=%.3f, pwm=%d | R: v=%.3f, e=%.3f, pwm=%d\n",
+        velocidad_left, error_left, pwm_left,
+        velocidad_right, error_right, pwm_right);
+
+        motor_set_speed(MOTOR_LEFT, pwm_left);
+        motor_set_speed(MOTOR_RIGHT, pwm_right);
+
+        error_left_prev = error_left;
+        error_right_prev = error_right;
+
+        vTaskDelay(periodo);
+        now = xTaskGetTickCount();
+    }
+    // Detener motores al finalizar
+    motor_set_speed(MOTOR_LEFT, 0);
+    motor_set_speed(MOTOR_RIGHT, 0);
+    vTaskDelete(NULL);
+}
+
+void task_curva(void *params) {
+    const uint32_t tiempo_ms = 5000; // 5 segundos
+    printf("Falta implementar curva\n");
+    vTaskDelay(pdMS_TO_TICKS(tiempo_ms));
+    vTaskDelete(NULL);
+}
+
+// Twiddle autotune para el motor izquierdo
+void task_tune_left_twiddle(void *params) {
+    float p[3] = {304.4f, 124.48f, 24.37f}; // Kp, Ki, Kd iniciales (mejor medidos)
+    float dp[3] = {30.44f, 12.448f, 2.437f}; // ~10% de cada parámetro
+    float best_error = 1e9;
+    float setpoints[] = {0.2f, 0.6f, 1.0f};
+    int num_setpoints = sizeof(setpoints)/sizeof(float);
+    const float periodo = 0.20f; // segundos (alineado con tacómetro 200ms)
+    const int ciclos = 24; // más ciclos para mejor estadística
+    const int warmup = 8; // más warm-up para estabilizar
+    const float threshold = 0.1f; // umbral más estricto para detener Twiddle
+    const float anti_windup_limit = 10.0f; // mayor margen para integral
+    const float alpha_vel = 0.3f; // filtro EMA para velocidad
+
+    TickType_t last_wake;
+    int max_iter = 80; // cantidad máxima de iteraciones
+    int iter = 0;
+    while ((dp[0] + dp[1] + dp[2] > threshold) && (iter < max_iter)) {
+        printf("[Twiddle_L] Iteración num %d: dp_sum=%.4f, Kp=%.3f, Ki=%.3f, Kd=%.3f, best_error=%.3f\n", iter, dp[0]+dp[1]+dp[2], p[0], p[1], p[2], best_error);
+    for (int i = 0; i < 3; i++) {
+            float old_pi = p[i];
+            p[i] += dp[i];
+            printf("[Twiddle_L] Probar parámetro %d: p=%.3f, dp=%.4f\n", i, p[i], dp[i]);
+            float error = 0;
+            for (int s = 0; s < num_setpoints; s++) {
+                float setpoint = setpoints[s];
+                int pwmbase = (setpoint == 0.6f) ? 210 : (setpoint == 1.0f) ? 240 : 180;
+                float error_prev = 0, integral = 0, velocidad_left = 0, v_filt = 0, v_filt_prev = 0;
+                // Warm-up: estabiliza el sistema antes de medir error
+                for (int t = 0; t < warmup; t++) {
+                    xQueuePeek(q_tacometro_left, &velocidad_left, pdMS_TO_TICKS((int)(periodo*1000)));
+                    // Filtrado EMA de la velocidad medida y derivada sobre medición
+                    v_filt = alpha_vel * velocidad_left + (1 - alpha_vel) * v_filt_prev;
+                    float e = setpoint - v_filt;
+                    float derivada = -(v_filt - v_filt_prev) / periodo;
+                    // Integración condicional (anti-windup)
+                    float integral_candidate = integral + e * periodo;
+                    if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                    if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                    float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                    int pwm_candidate = pwmbase + (int)pid_candidate;
+                    int pwm = pwm_candidate;
+                    if (pwm > 255) pwm = 255;
+                    if (pwm < 0) pwm = 0;
+                    // Si saturó y el error empuja más a saturación, no integramos
+                    if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                        integral = integral_candidate;
+                    }
+                    motor_set_speed(MOTOR_LEFT, pwm);
+                    error_prev = e;
+                    v_filt_prev = v_filt;
+                    last_wake = xTaskGetTickCount();
+                    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                }
+                // Medición de error robusta (RMSE)
+                float sq_error = 0;
+                for (int t = 0; t < ciclos; t++) {
+                    xQueuePeek(q_tacometro_left, &velocidad_left, pdMS_TO_TICKS((int)(periodo*1000)));
+                    v_filt = alpha_vel * velocidad_left + (1 - alpha_vel) * v_filt_prev;
+                    float e = setpoint - v_filt;
+                    float derivada = -(v_filt - v_filt_prev) / periodo;
+                    float integral_candidate = integral + e * periodo;
+                    if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                    if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                    float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                    int pwm_candidate = pwmbase + (int)pid_candidate;
+                    int pwm = pwm_candidate;
+                    if (pwm > 255) pwm = 255;
+                    if (pwm < 0) pwm = 0;
+                    if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                        integral = integral_candidate;
+                    }
+                    motor_set_speed(MOTOR_LEFT, pwm);
+                    if (t >= (ciclos/2)) { // enfocar en régimen permanente
+                        sq_error += e*e;
+                    }
+                    error_prev = e;
+                    v_filt_prev = v_filt;
+                    last_wake = xTaskGetTickCount();
+                    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                }
+                error += sqrtf(sq_error / ciclos); // RMSE
+                motor_set_speed(MOTOR_LEFT, 0);
+                vTaskDelay(pdMS_TO_TICKS(300));
+            }
+            if (error < best_error) {
+                best_error = error;
+                dp[i] *= 1.05f;
+                printf("[Twiddle_L] ¡Mejora! Nuevo best_error=%.4f, dp[%d]=%.4f\n", best_error, i, dp[i]);
+            } else {
+                p[i] = old_pi - dp[i];
+                error = 0;
+                for (int s = 0; s < num_setpoints; s++) {
+                    float setpoint = setpoints[s];
+                    int pwmbase = (setpoint == 0.6f) ? 210 : (setpoint == 1.0f) ? 240 : 180;
+                    float error_prev = 0, integral = 0, velocidad_left = 0, v_filt = 0, v_filt_prev = 0;
+                    for (int t = 0; t < warmup; t++) {
+                        xQueuePeek(q_tacometro_left, &velocidad_left, pdMS_TO_TICKS((int)(periodo*1000)));
+                        v_filt = alpha_vel * velocidad_left + (1 - alpha_vel) * v_filt_prev;
+                        float e = setpoint - v_filt;
+                        float derivada = -(v_filt - v_filt_prev) / periodo;
+                        float integral_candidate = integral + e * periodo;
+                        if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                        if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                        float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                        int pwm_candidate = pwmbase + (int)pid_candidate;
+                        int pwm = pwm_candidate;
+                        if (pwm > 255) pwm = 255;
+                        if (pwm < 0) pwm = 0;
+                        if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                            integral = integral_candidate;
+                        }
+                        motor_set_speed(MOTOR_LEFT, pwm);
+                        error_prev = e;
+                        v_filt_prev = v_filt;
+                        last_wake = xTaskGetTickCount();
+                        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                    }
+                    float sq_error = 0;
+                    for (int t = 0; t < ciclos; t++) {
+                        xQueuePeek(q_tacometro_left, &velocidad_left, pdMS_TO_TICKS((int)(periodo*1000)));
+                        v_filt = alpha_vel * velocidad_left + (1 - alpha_vel) * v_filt_prev;
+                        float e = setpoint - v_filt;
+                        float derivada = -(v_filt - v_filt_prev) / periodo;
+                        float integral_candidate = integral + e * periodo;
+                        if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                        if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                        float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                        int pwm_candidate = pwmbase + (int)pid_candidate;
+                        int pwm = pwm_candidate;
+                        if (pwm > 255) pwm = 255;
+                        if (pwm < 0) pwm = 0;
+                        if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                            integral = integral_candidate;
+                        }
+                        motor_set_speed(MOTOR_LEFT, pwm);
+                        if (t >= (ciclos/2)) {
+                            sq_error += e*e;
+                        }
+                        error_prev = e;
+                        v_filt_prev = v_filt;
+                        last_wake = xTaskGetTickCount();
+                        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                    }
+                    error += sqrtf(sq_error / ciclos);
+                    motor_set_speed(MOTOR_LEFT, 0);
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                }
+                if (error < best_error) {
+                    best_error = error;
+                    dp[i] *= 1.05f;
+                    printf("[Twiddle_L] ¡Mejora! Nuevo best_error=%.4f, dp[%d]=%.4f\n", best_error, i, dp[i]);
+                } else {
+                    p[i] = old_pi;
+                    dp[i] *= 0.95f;
+                    printf("[Twiddle_L] Sin mejora, restaurando p[%d]=%.3f, reduciendo dp[%d]=%.4f\n", i, p[i], i, dp[i]);
+                }
+            }
+        }
+        iter++;
+    }
+    printf("Twiddle PID Left: Kp=%.3f, Ki=%.3f, Kd=%.3f, error=%.3f\n", p[0], p[1], p[2], best_error);
+    vTaskDelete(NULL);
+}
+
+
+// Twiddle autotune para el motor derecho
+void task_tune_right_twiddle(void *params) {
+    float p[3] = {234.0f, 92.64f, 23.0f}; // Kp, Ki, Kd iniciales (mejor medidos)
+    float dp[3] = {23.4f, 9.264f, 2.3f}; // ~10% de cada parámetro
+    float best_error = 1e9;
+    float setpoints[] = {0.2f, 0.6f, 1.0f};
+    int num_setpoints = sizeof(setpoints)/sizeof(float);
+    const float periodo = 0.20f; // alineado con tacómetro
+    const int ciclos = 24;
+    const int warmup = 8;
+    const float threshold = 0.1f; // umbral más estricto para detener Twiddle
+    const float anti_windup_limit = 10.0f;
+    const float alpha_vel = 0.3f; // filtro EMA para velocidad
+
+    TickType_t last_wake;
+    int max_iter = 80; // cantidad máxima de iteraciones
+    int iter = 0;
+    while ((dp[0] + dp[1] + dp[2] > threshold) && (iter < max_iter)) {
+    printf("[Twiddle_R] Iteración num %d: dp_sum=%.4f, Kp=%.3f, Ki=%.3f, Kd=%.3f, best_error=%.3f\n", iter, dp[0]+dp[1]+dp[2], p[0], p[1], p[2], best_error);
+    for (int i = 0; i < 3; i++) {
+            float old_pi = p[i];
+            p[i] += dp[i];
+            float error = 0;
+            for (int s = 0; s < num_setpoints; s++) {
+                float setpoint = setpoints[s];
+                int pwmbase = (setpoint == 0.6f) ? 210 : (setpoint == 1.0f) ? 240 : 180;
+                float error_prev = 0, integral = 0, velocidad_right = 0, v_filt = 0, v_filt_prev = 0;
+                for (int t = 0; t < warmup; t++) {
+                    xQueuePeek(q_tacometro_right, &velocidad_right, pdMS_TO_TICKS((int)(periodo*1000)));
+                    v_filt = alpha_vel * velocidad_right + (1 - alpha_vel) * v_filt_prev;
+                    float e = setpoint - v_filt;
+                    float derivada = -(v_filt - v_filt_prev) / periodo;
+                    float integral_candidate = integral + e * periodo;
+                    if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                    if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                    float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                    int pwm_candidate = pwmbase + (int)pid_candidate;
+                    int pwm = pwm_candidate;
+                    if (pwm > 255) pwm = 255;
+                    if (pwm < 0) pwm = 0;
+                    if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                        integral = integral_candidate;
+                    }
+                    motor_set_speed(MOTOR_RIGHT, pwm);
+                    error_prev = e;
+                    v_filt_prev = v_filt;
+                    last_wake = xTaskGetTickCount();
+                    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                }
+                float sq_error = 0;
+                for (int t = 0; t < ciclos; t++) {
+                    xQueuePeek(q_tacometro_right, &velocidad_right, pdMS_TO_TICKS((int)(periodo*1000)));
+                    v_filt = alpha_vel * velocidad_right + (1 - alpha_vel) * v_filt_prev;
+                    float e = setpoint - v_filt;
+                    float derivada = -(v_filt - v_filt_prev) / periodo;
+                    float integral_candidate = integral + e * periodo;
+                    if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                    if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                    float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                    int pwm_candidate = pwmbase + (int)pid_candidate;
+                    int pwm = pwm_candidate;
+                    if (pwm > 255) pwm = 255;
+                    if (pwm < 0) pwm = 0;
+                    if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                        integral = integral_candidate;
+                    }
+                    motor_set_speed(MOTOR_RIGHT, pwm);
+                    if (t >= (ciclos/2)) {
+                        sq_error += e*e;
+                    }
+                    error_prev = e;
+                    v_filt_prev = v_filt;
+                    last_wake = xTaskGetTickCount();
+                    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                }
+                error += sqrtf(sq_error / ciclos);
+                motor_set_speed(MOTOR_RIGHT, 0);
+                vTaskDelay(pdMS_TO_TICKS(300));
+            }
+            printf("[Twiddle_R] Error obtenido: %.4f (parámetro %d)\n", error, i);
+            if (error < best_error) {
+                best_error = error;
+                dp[i] *= 1.05f;
+                printf("[Twiddle_R] ¡Mejora! Nuevo best_error=%.4f, dp[%d]=%.4f\n", best_error, i, dp[i]);
+            } else {
+                p[i] = old_pi - dp[i];
+                error = 0;
+                for (int s = 0; s < num_setpoints; s++) {
+                    float setpoint = setpoints[s];
+                    int pwmbase = (setpoint == 0.6f) ? 210 : (setpoint == 1.0f) ? 240 : 180;
+                    float error_prev = 0, integral = 0, velocidad_right = 0, v_filt = 0, v_filt_prev = 0;
+                    for (int t = 0; t < warmup; t++) {
+                        xQueuePeek(q_tacometro_right, &velocidad_right, pdMS_TO_TICKS((int)(periodo*1000)));
+                        v_filt = alpha_vel * velocidad_right + (1 - alpha_vel) * v_filt_prev;
+                        float e = setpoint - v_filt;
+                        float derivada = -(v_filt - v_filt_prev) / periodo;
+                        float integral_candidate = integral + e * periodo;
+                        if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                        if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                        float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                        int pwm_candidate = pwmbase + (int)pid_candidate;
+                        int pwm = pwm_candidate;
+                        if (pwm > 255) pwm = 255;
+                        if (pwm < 0) pwm = 0;
+                        if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                            integral = integral_candidate;
+                        }
+                        motor_set_speed(MOTOR_RIGHT, pwm);
+                        error_prev = e;
+                        v_filt_prev = v_filt;
+                        last_wake = xTaskGetTickCount();
+                        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                    }
+                    float sq_error = 0;
+                    for (int t = 0; t < ciclos; t++) {
+                        xQueuePeek(q_tacometro_right, &velocidad_right, pdMS_TO_TICKS((int)(periodo*1000)));
+                        v_filt = alpha_vel * velocidad_right + (1 - alpha_vel) * v_filt_prev;
+                        float e = setpoint - v_filt;
+                        float derivada = -(v_filt - v_filt_prev) / periodo;
+                        float integral_candidate = integral + e * periodo;
+                        if (integral_candidate > anti_windup_limit) integral_candidate = anti_windup_limit;
+                        if (integral_candidate < -anti_windup_limit) integral_candidate = -anti_windup_limit;
+                        float pid_candidate = p[0]*e + p[1]*integral_candidate + p[2]*derivada;
+                        int pwm_candidate = pwmbase + (int)pid_candidate;
+                        int pwm = pwm_candidate;
+                        if (pwm > 255) pwm = 255;
+                        if (pwm < 0) pwm = 0;
+                        if (!((pwm == 255 && e > 0) || (pwm == 0 && e < 0))) {
+                            integral = integral_candidate;
+                        }
+                        motor_set_speed(MOTOR_RIGHT, pwm);
+                        if (t >= (ciclos/2)) {
+                            sq_error += e*e;
+                        }
+                        error_prev = e;
+                        v_filt_prev = v_filt;
+                        last_wake = xTaskGetTickCount();
+                        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS((int)(periodo*1000)));
+                    }
+                    error += sqrtf(sq_error / ciclos);
+                    motor_set_speed(MOTOR_RIGHT, 0);
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                }
+                if (error < best_error) {
+                    best_error = error;
+                    dp[i] *= 1.05f;
+                    printf("[Twiddle_R] ¡Mejora! Nuevo best_error=%.4f, dp[%d]=%.4f\n", best_error, i, dp[i]);
+                } else {
+                    p[i] = old_pi;
+                    dp[i] *= 0.95f;
+                    printf("[Twiddle_R] Sin mejora, restaurando p[%d]=%.3f, reduciendo dp[%d]=%.4f\n", i, p[i], i, dp[i]);
+                }
+            }
+        }
+        
+        iter++;
+    }
+    printf("Twiddle PID Right: Kp=%.3f, Ki=%.3f, Kd=%.3f, error=%.3f\n", p[0], p[1], p[2], best_error);
+    vTaskDelete(NULL);
+}
+
+
+
 int main()
 {
     stdio_init_all();
     configurar_gpio();
     init_uart();
+    motor_init();
+    motor_set_direction(MOTOR_LEFT,true);  // Sentido "hacia adelante"
+    motor_set_direction(MOTOR_RIGHT,true);
+
+    // Leer PID guardados en EEPROM (LEFT)
+    char pidl_buf[48] = {0};
+    float Kp_left = 6.0f, Ki_left = 0.0f, Kd_left = 0.0f;
+    if (at24c32_read(i2c1, 0x100, (uint8_t*)pidl_buf, sizeof(pidl_buf))) {
+        if (strncmp(pidl_buf, "PIDL:", 5) == 0) {
+            sscanf(pidl_buf+5, "%f,%f,%f", &Kp_left, &Ki_left, &Kd_left);
+            printf("[EEPROM] PID LEFT: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", Kp_left, Ki_left, Kd_left);
+        }
+    }
+    // Leer PID guardados en EEPROM (RIGHT)
+    char pidr_buf[48] = {0};
+    float Kp_right = 4.0f, Ki_right = 0.0f, Kd_right = 0.0f;
+    if (at24c32_read(i2c1, 0x140, (uint8_t*)pidr_buf, sizeof(pidr_buf))) {
+        if (strncmp(pidr_buf, "PIDR:", 5) == 0) {
+            sscanf(pidr_buf+5, "%f,%f,%f", &Kp_right, &Ki_right, &Kd_right);
+            printf("[EEPROM] PID RIGHT: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", Kp_right, Ki_right, Kd_right);
+        }
+    }
 
     //INICIALIZACION DE LAS COLAS 
     q_codigo                = xQueueCreate(100 , sizeof(char[MAX_INPUT + 1])  );
-    q_vel_impuesta_right    = xQueueCreate(1 , sizeof(uint16_t)  );
-    q_vel_impuesta_left     = xQueueCreate(1 , sizeof(uint16_t)  );
-    q_tacometro_left        = xQueueCreate(1 , sizeof(int) );
-    q_tacometro_right       = xQueueCreate(1 , sizeof(int) );
+
+    q_tacometro_left        = xQueueCreate(1 , sizeof(float) );
+    q_tacometro_right       = xQueueCreate(1 , sizeof(float) );
     q_uart                  = xQueueCreate(1 , sizeof(char[MAX_INPUT + 1])  );
     q_bluetooth_chars       = xQueueCreate(MAX_INPUT, sizeof(char));
 
@@ -669,16 +950,17 @@ int main()
     //xTaskCreate(task_matrix     , "Matrix"      , 2 * configMINIMAL_STACK_SIZE  , NULL, 4, NULL);
     
     //xTaskCreate(task_lcd, "LCD",  configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-    xTaskCreate(task_PID_left       , "PID Left"        , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
-    xTaskCreate(task_PID_right      , "PID Right"       , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
-    xTaskCreate(task_motor          , "Motor"           , configMINIMAL_STACK_SIZE *3  , NULL, 4, NULL);
+    //xTaskCreate(task_PID_left       , "PID Left"        , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
+    //xTaskCreate(task_PID_right      , "PID Right"       , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
+    //xTaskCreate(task_motor          , "Motor"           , configMINIMAL_STACK_SIZE *3  , NULL, 4, NULL);
     xTaskCreate(task_tacometro_left , "Tacometro Left"  , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
     xTaskCreate(task_tacometro_right, "Tacometro Right" , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
     xTaskCreate(task_bluetooth      , "Bluetooth"       , 2 * configMINIMAL_STACK_SIZE , NULL, 5, NULL);
+    // xTaskCreate(task_recto         , "Recto"          , configMINIMAL_STACK_SIZE , NULL, 3, NULL);
 
     vTaskStartScheduler();
     while (true) {
-        
+        // ...existing code...
     }
 }
 
