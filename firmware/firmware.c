@@ -27,11 +27,11 @@
 #define IN_PIN_TACOMETRO_LEFT 28
 #define IN_PIN_TACOMETRO_RIGHT 27
 // Configuración de la frecuencia PWM (Hz)
-#define PWM_FREQ 15000
+#define PWM_FREQ 20000
 // Cambiar velocidad (0 a 255)
 #define MOTOR_LEFT      1
 #define MOTOR_RIGHT     2
-#define PI 3.14f
+#define PI 3.14159265f
 //Modos 
 //SEGUN EL MODO, PONEMOS LA VELOCIDAD
 #define VEL_01  97.0f
@@ -41,6 +41,9 @@
 #define CURVA_02 0.5f
 #define CURVA_03 0.25f
 #define RECTA 0.0f
+// Muestras para el filtro de media movil
+#define N_PROM 5  // (0.5 s si el periodo es 100 ms)
+
 
 //Constantes del auto
 #define ANCHO 0.134f // Mitad del ancho de las ruedas
@@ -63,6 +66,7 @@ void task_recto(void *params);
 void task_curva(void *params);
 void task_tune_left_twiddle(void *params);
 void task_tune_right_twiddle(void *params);
+void task_calibracion(void *params);
 
 
 //Defino mi cola
@@ -74,6 +78,22 @@ QueueHandle_t q_vel_impuesta_left ;
 QueueHandle_t q_vel_impuesta_right ;
 QueueHandle_t q_bluetooth_chars;
 QueueHandle_t q_codigo;
+
+// ===== Calibración de ruedas: zona muerta (d_dead) y ganancia k =====
+// Requiere: q_tacometro_left, q_tacometro_right (vel en m/s cada 100 ms)
+//           motor_set_direction(), motor_set_speed() ya existentes
+// Umbrales ajustables:
+#define SWEEP_STEP_DUTY          8      // paso de duty
+#define SWEEP_SETTLE_MS          400    // tiempo para estabilizar en cada duty
+#define SWEEP_AVG_SAMPLES        5      // muestras de 100 ms cada una (asumimos tacómetro a 100 ms)
+#define DEAD_V_THRESHOLD         0.04f  // m/s a partir del cual consideramos "empezó a moverse"
+#define REG_MARGIN_DUTY          12     // margen por encima de d_dead para la regresión
+
+typedef struct {
+    float d_dead;   // en niveles de PWM (0..255)
+    float k;        // [m/s por nivel de PWM] sobre (duty - d_dead)
+} calib_result_t;
+
 
 typedef struct {
     float v_inner;
@@ -231,7 +251,7 @@ void task_bluetooth(void *params) {
                 } else if (c == 'A' || c == 'B' || c == 'C'|| c == 'D') {
                     buffer[1] = c;
                     cod_letter = 1 ;
-                } else if (c == 'R' || c == 'M' || c == 'E' || c == 'P' || c == 'N' || c == 'Y') {
+                } else if (c == 'R' || c == 'M' || c == 'E' || c == 'P' || c == 'N' || c == 'Y' || c == 'Q') {
                     buffer[0] = c;
                     index = 1;
                 } else {
@@ -258,6 +278,7 @@ void task_bluetooth(void *params) {
                     printf("E#  - Borrar toda la EEPROM\n");
                     printf("N#  - Ejecutar autotuning PID (Twiddle)\n");
                     printf("Y#  - Leer PID óptimos guardados\n");
+                    printf("Q#  - Calibración de las ruedas\n");
                     printf("P#  - Guardar comando personalizado\n");
                     printf("[1-3][A-D]# - Ejecutar recorrido (ej: 1A#, 2B#)\n");
                     printf("------------------------------------\n");
@@ -360,6 +381,17 @@ void task_bluetooth(void *params) {
                     cod_num = 0; 
                     cod_letter = 0;
                 }
+                if (index == 1 && buffer[0] == 'Q') {
+                    buffer[2] = '\0';
+                    printf("Ingresado: %s\n", buffer);
+                    //index = 2;
+                    at24c32_write_log(i2c1, eeprom_addr, buffer);
+                    eeprom_addr += 48;
+                    xTaskCreate(task_calibracion, "Calib", 3 * configMINIMAL_STACK_SIZE, NULL, 3, NULL);
+                    memset(buffer, 0, sizeof(buffer));
+                    cod_num = 0; 
+                    cod_letter = 0;
+                }
                 // Verifica formato de comando normal
                 else if (cod_num == 1 && cod_letter==1) {
                     buffer[2] = '\0';
@@ -405,8 +437,14 @@ void task_tacometro_right(void *params) {
     char str[16];
     float vel_derecha = 0;
 
+    // buffers y estado del filtro (privados de ESTA tarea)
+    static float buf[N_PROM] = {0};
+    static float sum = 0.0f;
+    static int   idx = 0;
+
     TickType_t start_tick = xTaskGetTickCount();  // tiempo de referencia
-    const TickType_t periodo = pdMS_TO_TICKS(200);  // 200 ms
+    const TickType_t periodo = pdMS_TO_TICKS(100);  // 100 ms
+    const float T = ((float)periodo) / configTICK_RATE_HZ;
 
     while (true) {
         int estado_actual = gpio_get(IN_PIN_TACOMETRO_RIGHT);
@@ -422,10 +460,16 @@ void task_tacometro_right(void *params) {
         // ¿Pasó 1 segundo?
         if ((xTaskGetTickCount() - start_tick) >= periodo) {
             vueltas = counter / 20.0f;
-            vel_derecha = vueltas * 2 * PI * R_WHEEL; // m/s
-            
-            xQueueOverwrite(q_tacometro_right , &vel_derecha  );
-            xQueuePeek(q_tacometro_right, &vel_derecha, 0);
+            vel_derecha = vueltas * 2 * PI * R_WHEEL / T; // m/s
+
+            // media móvil incremental
+            sum += vel_derecha - buf[idx];
+            buf[idx] = vel_derecha;
+            idx = (idx + 1) % N_PROM;
+            const float v_filtrada = sum / (float)N_PROM;
+
+            xQueueOverwrite(q_tacometro_right , &v_filtrada );
+            //xQueuePeek(q_tacometro_right, &vel_derecha, 0);
             //printf("Vel Der: %.3f [m/s], counter: %d, vueltas: %.2f\n", vel_derecha, counter, vueltas);
             counter = 0;
             vueltas = 0;
@@ -443,8 +487,14 @@ void task_tacometro_left(void *params) {
     char str[16];
     float vel_izquierda = 0;
 
+    // buffers y estado del filtro (privados de ESTA tarea)
+    static float buf[N_PROM] = {0};
+    static float sum = 0.0f;
+    static int   idx = 0;
+
     TickType_t start_tick = xTaskGetTickCount();  // tiempo de referencia
-    const TickType_t periodo = pdMS_TO_TICKS(200);  // 200 ms
+    const TickType_t periodo = pdMS_TO_TICKS(100);  // 100 ms
+    const float T = ((float)periodo) / configTICK_RATE_HZ;
 
     while (true) {
         int estado_actual = gpio_get(IN_PIN_TACOMETRO_LEFT);
@@ -460,9 +510,15 @@ void task_tacometro_left(void *params) {
         // ¿Pasó 1 segundo?
         if ((xTaskGetTickCount() - start_tick) >= periodo) {
             vueltas = counter / 20.0f;
-            vel_izquierda = vueltas * 2 * PI * R_WHEEL; // m/s
-            xQueueOverwrite(q_tacometro_left , &vel_izquierda );
-            xQueuePeek(q_tacometro_left, &vel_izquierda, 0);
+            vel_izquierda = vueltas * 2 * PI * R_WHEEL / T; // m/s
+
+            // media móvil incremental
+            sum += vel_izquierda - buf[idx];
+            buf[idx] = vel_izquierda;
+            idx = (idx + 1) % N_PROM;
+            const float v_filtrada = sum / (float)N_PROM;
+            xQueueOverwrite(q_tacometro_left , &v_filtrada );
+            //xQueuePeek(q_tacometro_left, &vel_izquierda, 0);
             //printf("Vel Izq: %.3f [m/s], counter: %d, vueltas: %.2f\n", vel_izquierda, counter, vueltas);
             counter = 0;
             vueltas = 0;
@@ -473,104 +529,279 @@ void task_tacometro_left(void *params) {
     }
 }
 
+// Lectura de velocidad desde la cola correspondiente
+static bool leer_velocidad_rueda(uint8_t rueda, float *v, TickType_t timeout_ticks) {
+    if (rueda == MOTOR_LEFT) {
+        return xQueueReceive(q_tacometro_left, v, timeout_ticks);
+    } else {
+        return xQueueReceive(q_tacometro_right, v, timeout_ticks);
+    }
+}
 
-void task_recto(void *params) {
-    const uint32_t tiempo_ms = 10000; // 4 segundos
-    
-    // PID para cada motor
-    // Izquierdo
-    const float Kp_left = 6.0f;
-    const float Ki_left = 0.0f;
-    const float Kd_left = 0.0f;
-    float error_left = 0, error_left_prev = 0, integral_left = 0, derivada_left = 0;
-    // Derecho
-    const float Kp_right = 4.0f;
-    const float Ki_right = 0.0f;
-    const float Kd_right = 0.0f;
-    float error_right = 0, error_right_prev = 0, integral_right = 0, derivada_right = 0;
-    float velocidad_left = 0, velocidad_right = 0;
-    float pid_left = 0, pid_right = 0;
-    // Valores base
-    uint16_t pwm_left = 180;
-    uint16_t pwm_right = 180;
-    uint16_t PWMBASE = 180;
-    // Setpoints de velocidad para cada motor (m/s)
-    float setpoint_left = 0.2f;
-    float setpoint_right = 0.2f;
-    char cmd_buffer[MAX_INPUT + 1] = {0};
-    // Espera y lee el comando desde la cola q_uart
-    if (xQueueReceive(q_uart, &cmd_buffer, portMAX_DELAY)) {
-        switch (cmd_buffer[0]) {
-            case '1':
-                setpoint_left = 0.2f;
-                setpoint_right = 0.2f;
-                PWMBASE = 180;
-                break;
-            case '2':
-                setpoint_left = 0.6f;
-                setpoint_right = 0.6f;
-                PWMBASE = 210;
-                break;
-            case '3':
-                setpoint_left = 1.0f;
-                setpoint_right = 1.0f;
-                PWMBASE = 240;
-                break;
-            default:
-                setpoint_left = 0.2f;
-                setpoint_right = 0.2f;
-                PWMBASE = 180;
-                break;
+// Sweep por rueda y sentido. Devuelve d_dead y k (por referencia).
+static void sweep_rueda(uint8_t rueda, bool forward, calib_result_t *out) {
+    // Buffers para recolectar datos (duty, v)
+    float duty_buf[256 / SWEEP_STEP_DUTY + 2];
+    float v_buf[256 / SWEEP_STEP_DUTY + 2];
+    int    n = 0;
+
+    // Configurar sentido
+    motor_set_direction(rueda, forward);
+
+    // Barrido de duty
+    for (int duty = 0; duty <= 255; duty += SWEEP_STEP_DUTY) {
+        motor_set_speed(rueda, duty);
+        vTaskDelay(pdMS_TO_TICKS(SWEEP_SETTLE_MS));  // estabilizar
+
+        // Promediar SWEEP_AVG_SAMPLES muestras del tacómetro (asumimos 100 ms cada una)
+        float v_sum = 0.0f;
+        int   got   = 0;
+        for (int i = 0; i < SWEEP_AVG_SAMPLES; i++) {
+            float v = 0.0f;
+            if (leer_velocidad_rueda(rueda, &v, pdMS_TO_TICKS(150))) {
+                v_sum += v;
+                got++;
+            } else {
+                // Si no llegó a tiempo, esperá un poco y seguí intentando
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+        }
+        float v_avg = (got > 0) ? (v_sum / (float)got) : 0.0f;
+
+        // Guardar muestra
+        duty_buf[n] = (float)duty;
+        v_buf[n]    = v_avg;
+        n++;
+
+        // Log CSV en vivo (podés comentar si molesta)
+        printf("CAL,%s,%s,%d,%.5f\n",
+               (rueda == MOTOR_LEFT) ? "L" : "R",
+               forward ? "FWD" : "REV",
+               duty, v_avg);
+    }
+
+    // Detener la rueda
+    motor_set_speed(rueda, 0);
+
+    // 1) Encontrar d_dead: primer duty con v >= DEAD_V_THRESHOLD
+    float d_dead = 255.0f;
+    for (int i = 0; i < n; i++) {
+        if (v_buf[i] >= DEAD_V_THRESHOLD) {
+            d_dead = duty_buf[i];
+            break;
         }
     }
 
-    TickType_t start = xTaskGetTickCount();
-    TickType_t now = start;
-    const TickType_t periodo = pdMS_TO_TICKS(200); // 200 ms de ciclo PID
-    const float dt = 0.2f; // 200 ms en segundos
-
-    while ((now - start) < pdMS_TO_TICKS(tiempo_ms)) {
-        // Leer velocidad real calculada por la tarea tacómetro
-        xQueueReceive(q_tacometro_left, &velocidad_left, 0);
-        xQueueReceive(q_tacometro_right, &velocidad_right, 0);
-
-        // PID izquierdo
-        error_left = setpoint_left - velocidad_left;
-        integral_left += error_left * dt;
-        derivada_left = (error_left - error_left_prev) / dt;
-        pid_left = Kp_left * error_left + Ki_left * integral_left + Kd_left * derivada_left;
-        printf("PID Left: %.3f (e=%.3f, i=%.3f, d=%.3f)\n", pid_left, error_left, integral_left, derivada_left);
-        // PID derecho
-        error_right = setpoint_right - velocidad_right;
-        integral_right += error_right * dt;
-        derivada_right = (error_right - error_right_prev) / dt;
-        pid_right = Kp_right * error_right + Ki_right * integral_right + Kd_right * derivada_right;
-        printf("PID Right: %.3f (e=%.3f, i=%.3f, d=%.3f)\n", pid_right, error_right, integral_right, derivada_right);
-        // Ajustar PWM de cada motor
-        pwm_left = PWMBASE + (int16_t)pid_left;
-        pwm_right = PWMBASE + (int16_t)pid_right;
-
-        if (pwm_left > 255) pwm_left = 255;
-        if (pwm_left < 0) pwm_left = 0;
-        if (pwm_right > 255) pwm_right = 255;
-        if (pwm_right < 0) pwm_right = 0;
-
-        printf("L: v=%.3f, e=%.3f, pwm=%d | R: v=%.3f, e=%.3f, pwm=%d\n",
-        velocidad_left, error_left, pwm_left,
-        velocidad_right, error_right, pwm_right);
-
-        motor_set_speed(MOTOR_LEFT, pwm_left);
-        motor_set_speed(MOTOR_RIGHT, pwm_right);
-
-        error_left_prev = error_left;
-        error_right_prev = error_right;
-
-        vTaskDelay(periodo);
-        now = xTaskGetTickCount();
+    // 2) Calcular k con regresión lineal sobre puntos por encima de (d_dead + REG_MARGIN_DUTY)
+    float x_sum = 0.0f, y_sum = 0.0f, xx_sum = 0.0f, xy_sum = 0.0f;
+    int   m     = 0;
+    for (int i = 0; i < n; i++) {
+        float duty = duty_buf[i];
+        float v    = v_buf[i];
+        if (duty >= (d_dead + REG_MARGIN_DUTY) && v > 0.0f) {
+            float x = duty - d_dead;   // centramos en d_dead
+            float y = v;               // velocidad en m/s
+            x_sum  += x;
+            y_sum  += y;
+            xx_sum += x * x;
+            xy_sum += x * y;
+            m++;
+        }
     }
-    // Detener motores al finalizar
-    motor_set_speed(MOTOR_LEFT, 0);
+
+    float k = 0.0f;
+    if (m >= 2) {
+        float denom = (m * xx_sum - x_sum * x_sum);
+        if (denom != 0.0f) {
+            k = (m * xy_sum - x_sum * y_sum) / denom;  // pendiente de la recta v = k*(duty - d_dead) + b
+        }
+    }
+
+    // Fallback si no hubo puntos útiles o denominador ~ 0: estimación dos-puntos
+    if (k <= 0.0f) {
+        // Buscar dos puntos distantes por encima de d_dead
+        int i1 = -1, i2 = -1;
+        for (int i = 0; i < n; i++) {
+            if (duty_buf[i] >= (d_dead + REG_MARGIN_DUTY) && v_buf[i] > 0.0f) { i1 = i; break; }
+        }
+        for (int i = n - 1; i >= 0; i--) {
+            if (duty_buf[i] >= (d_dead + REG_MARGIN_DUTY) && v_buf[i] > 0.0f) { i2 = i; break; }
+        }
+        if (i1 >= 0 && i2 >= 0 && i2 > i1) {
+            float x1 = duty_buf[i1] - d_dead;
+            float x2 = duty_buf[i2] - d_dead;
+            float y1 = v_buf[i1];
+            float y2 = v_buf[i2];
+            float dx = (x2 - x1);
+            if (dx != 0.0f) k = (y2 - y1) / dx;
+        }
+    }
+
+    // Si nunca se movió, d_dead=255 y k=0
+    if (d_dead >= 255.0f) {
+        d_dead = 255.0f;
+        k = 0.0f;
+    }
+
+    // Salida
+    if (out) { out->d_dead = d_dead; out->k = k; }
+
+    // Log final legible
+    printf("[CAL-RES] rueda=%s sentido=%s  d_dead=%.1f  k=%.6f (m/s por nivel)\n",
+           (rueda == MOTOR_LEFT) ? "LEFT" : "RIGHT",
+           forward ? "FWD" : "REV",
+           d_dead, k);
+}
+
+// ====== Wrapper de tarea para calibrar ambas ruedas en avance ======
+void task_calibracion(void *params) {
+    calib_result_t L = {0}, R = {0};
+
+    // Asumimos que tus tacómetros ya actualizan velocidad cada 100 ms.
+    // Hacemos sweep de Izquierda y Derecha, en avance.
+    sweep_rueda(MOTOR_LEFT,  true, &L);
+    sweep_rueda(MOTOR_RIGHT, true, &R);
+
+    printf("\n=== RESULTADOS CALIBRACIÓN (AVANCE) ===\n");
+    printf("LEFT : d_dead=%.1f | k=%.6f (m/s por nivel)\n",  L.d_dead, L.k);
+    printf("RIGHT: d_dead=%.1f | k=%.6f (m/s por nivel)\n",  R.d_dead, R.k);
+    printf("CSV arriba (prefijo CAL, por duty)\n");
+
+    // Podés guardar estos valores en variables globales o EEPROM si querés persistirlos.
+    // Luego, en tu lazo de control, usarás:
+    // u_ff_left  = L.d_dead  + v_ref / L.k;
+    // u_ff_right = R.d_dead  + v_ref / R.k;
+
+    // Terminar tarea si es one-shot
+    vTaskDelete(NULL);
+}
+
+
+
+// ===== Recta con Feedforward + PI (dt = 0.1 s, duración 5 s) =====
+void task_recto(void *params) {
+    // --- Ganancias medidas (tu calibración) ---
+    const float d_dead_L = 160.0f;
+    const float k_L      = 0.05f;   // [m/s por nivel]
+    const float d_dead_R = 176.0f;
+    const float k_R      = 0.058f;  // [m/s por nivel]
+
+    // --- Setpoints por comando (igual que antes) ---
+    float setpoint_left  = 0.2f;   // m/s
+    float setpoint_right = 0.2f;   // m/s
+    char cmd_buffer[MAX_INPUT + 1] = {0};
+
+    if (xQueueReceive(q_uart, &cmd_buffer, 0)) {
+        switch (cmd_buffer[0]) {
+            case '1': setpoint_left = setpoint_right = 0.2f;  break;
+            case '2': setpoint_left = setpoint_right = 0.6f;  break;
+            case '3': setpoint_left = setpoint_right = 1.0f;  break;
+            default:  setpoint_left = setpoint_right = 0.2f;  break;
+        }
+    }
+
+    // --- Controladores (PI por rueda) ---
+    float Kp_left  = 90.0f, Ki_left  = 50.0f, Kd_left  = 0.0f;
+    float Kp_right = 75.0f, Ki_right = 40.0f, Kd_right = 0.0f;
+
+    float error_left = 0, error_right = 0;
+    float error_left_prev = 0, error_right_prev = 0;
+    float integral_left = 0, integral_right = 0;
+
+    // --- Temporización: 100 ms coherente con tacómetro ---
+    const TickType_t periodo = pdMS_TO_TICKS(100);
+    const float dt = 0.1f;
+    TickType_t last_wake = xTaskGetTickCount();
+
+    // --- Slew-rate limit opcional ---
+    const float SLEW_PER_STEP = 1000.0f;
+    float u_left_prev = 0.0f, u_right_prev = 0.0f;
+
+    // --- Direcciones: ambas hacia adelante físico ---
+    motor_set_direction(MOTOR_LEFT,  true);
+    motor_set_direction(MOTOR_RIGHT, true);
+
+    // --- Tiempo total de prueba (8 s) ---
+    const float total_time_s = 8.0f;
+    const int total_cycles = (int)(total_time_s / dt);
+
+    // --- Contador para printf cada 0.5 s ---
+    int print_counter = 0;
+
+    // --- Loop principal (duración limitada) ---
+    for (int cycle = 0; cycle < total_cycles; cycle++) {
+        // 1) Leer velocidades medidas
+        float velocidad_left = 0.0f, velocidad_right = 0.0f;
+        xQueuePeek(q_tacometro_left,  &velocidad_left,  pdMS_TO_TICKS(50));
+        xQueuePeek(q_tacometro_right, &velocidad_right, pdMS_TO_TICKS(50));
+
+        // 2) Feedforward
+        float u_ff_L = d_dead_L + (setpoint_left  / k_L);
+        float u_ff_R = d_dead_R + (setpoint_right / k_R);
+        if (u_ff_L > 255) u_ff_L = 255; if (u_ff_L < 0) u_ff_L = 0;
+        if (u_ff_R > 255) u_ff_R = 255; if (u_ff_R < 0) u_ff_R = 0;
+
+        // 3) PI
+        error_left  = setpoint_left  - velocidad_left;
+        error_right = setpoint_right - velocidad_right;
+
+        integral_left  += error_left  * dt;
+        integral_right += error_right * dt;
+
+        float derivada_left  = (error_left  - error_left_prev)  / dt;
+        float derivada_right = (error_right - error_right_prev) / dt;
+
+        float pid_left  = Kp_left  * error_left  + Ki_left  * integral_left  + Kd_left  * derivada_left;
+        float pid_right = Kp_right * error_right + Ki_right * integral_right + Kd_right * derivada_right;
+
+        // 4) Salida total
+        float u_left  = u_ff_L + pid_left;
+        float u_right = u_ff_R + pid_right;
+
+        // 5) Saturación + anti-windup
+        if (u_left > 255)  { u_left = 255;  integral_left  -= error_left  * dt; }
+        if (u_left < 0)    { u_left = 0;    integral_left  -= error_left  * dt; }
+        if (u_right > 255) { u_right = 255; integral_right -= error_right * dt; }
+        if (u_right < 0)   { u_right = 0;   integral_right -= error_right * dt; }
+
+        // 6) Slew-rate
+        float duL = u_left  - u_left_prev;
+        float duR = u_right - u_right_prev;
+        if (duL >  SLEW_PER_STEP) u_left  = u_left_prev  + SLEW_PER_STEP;
+        if (duL < -SLEW_PER_STEP) u_left  = u_left_prev  - SLEW_PER_STEP;
+        if (duR >  SLEW_PER_STEP) u_right = u_right_prev + SLEW_PER_STEP;
+        if (duR < -SLEW_PER_STEP) u_right = u_right_prev - SLEW_PER_STEP;
+        u_left_prev  = u_left;
+        u_right_prev = u_right;
+
+        // 7) Aplicar PWM
+        motor_set_speed(MOTOR_LEFT,  (uint16_t)u_left);
+        motor_set_speed(MOTOR_RIGHT, (uint16_t)u_right);
+
+        // 8) Log cada 0.5 s
+        print_counter++;
+        if (print_counter >= 5) { // cada 5 ciclos (0.5 s)
+            print_counter = 0;
+            printf("t=%.1f  vL=%.3f  vR=%.3f  |  uFF_L=%.1f  uFF_R=%.1f  |  uL=%.1f  uR=%.1f  |  eL=%.3f  eR=%.3f\n",
+                   cycle * dt,
+                   velocidad_left, velocidad_right,
+                   u_ff_L, u_ff_R,
+                   u_left, u_right,
+                   error_left, error_right);
+        }
+
+        // 9) Actualizar errores y esperar siguiente ciclo
+        error_left_prev  = error_left;
+        error_right_prev = error_right;
+        vTaskDelayUntil(&last_wake, periodo);
+    }
+
+    // --- Fin de prueba: detener motores ---
+    motor_set_speed(MOTOR_LEFT,  0);
     motor_set_speed(MOTOR_RIGHT, 0);
+    printf("\n--- Fin de prueba (8 s). Motores detenidos ---\n");
+
+    // --- Eliminar la tarea ---
     vTaskDelete(NULL);
 }
 
