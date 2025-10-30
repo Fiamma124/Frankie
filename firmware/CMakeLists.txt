@@ -36,7 +36,7 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../freertos ${CMAKE_BINARY_DIR}/freer
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../lcd ${CMAKE_BINARY_DIR}/lcd)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../rtc ${CMAKE_BINARY_DIR}/rtc)
 # add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../bluetooth ${CMAKE_BINARY_DIR}/bluetooth)
-
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/tasks ${CMAKE_BINARY_DIR}/tasks)
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(firmware firmware.c )
@@ -55,6 +55,9 @@ target_link_libraries(firmware
     freertos
     lcd
     rtc)
+    # Link the tasks static library so the task implementations are included
+target_link_libraries(firmware
+    tasks)
 
 # Add the standard include files to the build
 target_include_directories(firmware PRIVATE
