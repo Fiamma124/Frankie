@@ -16,6 +16,9 @@ extern QueueHandle_t q_uart;
 extern QueueHandle_t q_bluetooth_chars;
 extern QueueHandle_t q_codigo;
 
+// Task handles for singleton tasks
+extern TaskHandle_t h_task_recto;
+
 // Prototypes for functions defined in firmware.c but used by tasks
 void print_fecha_hora_rtc(i2c_inst_t *i2c);
 void task_tune_left_twiddle(void *params);
