@@ -13,12 +13,12 @@
 #define MOTOR_M2_IN2 19
 #define MOTOR_M1_IN1 20
 #define MOTOR_M1_IN2 21
-#define MOTOR_RIGHT_PWM 22  // GPIO con soporte PWM
-#define MOTOR_LEFT_PWM 26  // GPIO con soporte PWM
+#define MOTOR_RIGHT_PWM 26  // GPIO con soporte PWM
+#define MOTOR_LEFT_PWM 22  // GPIO con soporte PWM
 
 // Pines para los tacometros
-#define IN_PIN_TACOMETRO_LEFT 28
-#define IN_PIN_TACOMETRO_RIGHT 27
+#define IN_PIN_TACOMETRO_LEFT 27
+#define IN_PIN_TACOMETRO_RIGHT 28
 
 // Configuración de la frecuencia PWM (Hz)
 #define PWM_FREQ 20000
@@ -32,8 +32,8 @@
 #define N_PROM 5  // (numero de muestras para promedio)
 #define R_WHEEL 0.0325f // Radio de las ruedas (m)
 
-// Keyboard / input
-#define MAX_INPUT 4
+// Keyboard / input: tamaño máximo de línea de comando UART (sin contar el '#')
+#define MAX_INPUT 128
 
 // UART
 #define UART_ID uart0
