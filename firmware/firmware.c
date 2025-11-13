@@ -10,6 +10,12 @@
 #include "lcd.h"
 #include "hardware/i2c.h"
 #include "rtc.h"
+#ifndef AT24C32_WRITE_STR_DECL
+#define AT24C32_WRITE_STR_DECL
+// Declaración adelantada (rtc.h en otro módulo aún no la expone)
+bool at24c32_write_str(i2c_inst_t *i2c, uint16_t addr, const char *str);
+bool eeprom_erase_prefix(i2c_inst_t *i2c, uint16_t end_addr); // forward decl borrado prefijo
+#endif
 
 // Shared project configuration (pins, constants used across modules)
 #include "config.h"
@@ -24,9 +30,6 @@
 #include "globals.h"
 #include "motor.h"
 
-void task_tune_left_twiddle(void *params);
-void task_tune_right_twiddle(void *params);
-void task_calibracion(void *params);
 
 
 //Defino mi cola
@@ -37,31 +40,9 @@ QueueHandle_t q_uart ;
 QueueHandle_t q_vel_impuesta_left ;
 QueueHandle_t q_vel_impuesta_right ;
 QueueHandle_t q_bluetooth_chars;
-QueueHandle_t q_codigo;
 
 // Task handles
 TaskHandle_t h_task_recto = NULL;
-
-// ===== Calibración de ruedas: zona muerta (d_dead) y ganancia k =====
-// Requiere: q_tacometro_left, q_tacometro_right (vel en m/s cada 100 ms)
-//           motor_set_direction(), motor_set_speed() ya existentes
-// Umbrales ajustables:
-#define SWEEP_STEP_DUTY          8      // paso de duty
-#define SWEEP_SETTLE_MS          400    // tiempo para estabilizar en cada duty
-#define SWEEP_AVG_SAMPLES        5      // muestras de 100 ms cada una (asumimos tacómetro a 100 ms)
-#define DEAD_V_THRESHOLD         0.04f  // m/s a partir del cual consideramos "empezó a moverse"
-#define REG_MARGIN_DUTY          12     // margen por encima de d_dead para la regresión
-
-typedef struct {
-    float d_dead;   // en niveles de PWM (0..255)
-    float k;        // [m/s por nivel de PWM] sobre (duty - d_dead)
-} calib_result_t;
-
-
-typedef struct {
-    float v_inner;
-    float v_outer;
-} VelData_t;
 
 void on_uart_rx(void);
 
@@ -74,8 +55,7 @@ void configurar_gpio() {
     gpio_init(IN_PIN_TACOMETRO_RIGHT);
     gpio_set_dir(IN_PIN_TACOMETRO_RIGHT, GPIO_IN);
     gpio_pull_down(IN_PIN_TACOMETRO_RIGHT);
-
-    
+       
     //INICIALIZACION DEL MOTOR
     //motor_init();
     //motor_set_direction(true);  
@@ -123,9 +103,9 @@ void on_uart_rx() {
         if (q_bluetooth_chars != NULL) {
             xQueueSendFromISR(q_bluetooth_chars, &c, &xHigherPriorityTaskWoken);
         }
-
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
+    // Hacer un único yield al final del servicio de interrupción
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 
@@ -202,11 +182,6 @@ void print_fecha_hora_rtc(i2c_inst_t *i2c) {
     }
 }
 
-// task_bluetooth implementation moved to tasks/task_bluetooth.c
-// task_tacometro_right moved to tasks/task_tacometro_right.c
-
-// task_tacometro_left moved to tasks/task_tacometro_left.c
-
 // Lectura de velocidad desde la cola correspondiente
 static bool leer_velocidad_rueda(uint8_t rueda, float *v, TickType_t timeout_ticks) {
     if (rueda == MOTOR_LEFT) {
@@ -216,174 +191,69 @@ static bool leer_velocidad_rueda(uint8_t rueda, float *v, TickType_t timeout_tic
     }
 }
 
-// Sweep por rueda y sentido. Devuelve d_dead y k (por referencia).
-static void sweep_rueda(uint8_t rueda, bool forward, calib_result_t *out) {
-    // Buffers para recolectar datos (duty, v)
-    float duty_buf[256 / SWEEP_STEP_DUTY + 2];
-    float v_buf[256 / SWEEP_STEP_DUTY + 2];
-    int    n = 0;
-
-    // Configurar sentido
-    motor_set_direction(rueda, forward);
-
-    // Barrido de duty
-    for (int duty = 0; duty <= 255; duty += SWEEP_STEP_DUTY) {
-        motor_set_speed(rueda, duty);
-        vTaskDelay(pdMS_TO_TICKS(SWEEP_SETTLE_MS));  // estabilizar
-
-        // Promediar SWEEP_AVG_SAMPLES muestras del tacómetro (asumimos 100 ms cada una)
-        float v_sum = 0.0f;
-        int   got   = 0;
-        for (int i = 0; i < SWEEP_AVG_SAMPLES; i++) {
-            float v = 0.0f;
-            if (leer_velocidad_rueda(rueda, &v, pdMS_TO_TICKS(150))) {
-                v_sum += v;
-                got++;
-            } else {
-                // Si no llegó a tiempo, esperá un poco y seguí intentando
-                vTaskDelay(pdMS_TO_TICKS(20));
-            }
-        }
-        float v_avg = (got > 0) ? (v_sum / (float)got) : 0.0f;
-
-        // Guardar muestra
-        duty_buf[n] = (float)duty;
-        v_buf[n]    = v_avg;
-        n++;
-
-        // Log CSV en vivo (podés comentar si molesta)
-        printf("CAL,%s,%s,%d,%.5f\n",
-               (rueda == MOTOR_LEFT) ? "L" : "R",
-               forward ? "FWD" : "REV",
-               duty, v_avg);
-    }
-
-    // Detener la rueda
-    motor_set_speed(rueda, 0);
-
-    // 1) Encontrar d_dead: primer duty con v >= DEAD_V_THRESHOLD
-    float d_dead = 255.0f;
-    for (int i = 0; i < n; i++) {
-        if (v_buf[i] >= DEAD_V_THRESHOLD) {
-            d_dead = duty_buf[i];
-            break;
-        }
-    }
-
-    // 2) Calcular k con regresión lineal sobre puntos por encima de (d_dead + REG_MARGIN_DUTY)
-    float x_sum = 0.0f, y_sum = 0.0f, xx_sum = 0.0f, xy_sum = 0.0f;
-    int   m     = 0;
-    for (int i = 0; i < n; i++) {
-        float duty = duty_buf[i];
-        float v    = v_buf[i];
-        if (duty >= (d_dead + REG_MARGIN_DUTY) && v > 0.0f) {
-            float x = duty - d_dead;   // centramos en d_dead
-            float y = v;               // velocidad en m/s
-            x_sum  += x;
-            y_sum  += y;
-            xx_sum += x * x;
-            xy_sum += x * y;
-            m++;
-        }
-    }
-
-    float k = 0.0f;
-    if (m >= 2) {
-        float denom = (m * xx_sum - x_sum * x_sum);
-        if (denom != 0.0f) {
-            k = (m * xy_sum - x_sum * y_sum) / denom;  // pendiente de la recta v = k*(duty - d_dead) + b
-        }
-    }
-
-    // Fallback si no hubo puntos útiles o denominador ~ 0: estimación dos-puntos
-    if (k <= 0.0f) {
-        // Buscar dos puntos distantes por encima de d_dead
-        int i1 = -1, i2 = -1;
-        for (int i = 0; i < n; i++) {
-            if (duty_buf[i] >= (d_dead + REG_MARGIN_DUTY) && v_buf[i] > 0.0f) { i1 = i; break; }
-        }
-        for (int i = n - 1; i >= 0; i--) {
-            if (duty_buf[i] >= (d_dead + REG_MARGIN_DUTY) && v_buf[i] > 0.0f) { i2 = i; break; }
-        }
-        if (i1 >= 0 && i2 >= 0 && i2 > i1) {
-            float x1 = duty_buf[i1] - d_dead;
-            float x2 = duty_buf[i2] - d_dead;
-            float y1 = v_buf[i1];
-            float y2 = v_buf[i2];
-            float dx = (x2 - x1);
-            if (dx != 0.0f) k = (y2 - y1) / dx;
-        }
-    }
-
-    // Si nunca se movió, d_dead=255 y k=0
-    if (d_dead >= 255.0f) {
-        d_dead = 255.0f;
-        k = 0.0f;
-    }
-
-    // Salida
-    if (out) { out->d_dead = d_dead; out->k = k; }
-
-    // Log final legible
-    printf("[CAL-RES] rueda=%s sentido=%s  d_dead=%.1f  k=%.6f (m/s por nivel)\n",
-           (rueda == MOTOR_LEFT) ? "LEFT" : "RIGHT",
-           forward ? "FWD" : "REV",
-           d_dead, k);
-}
-
-// ====== Wrapper de tarea para calibrar ambas ruedas en avance ======
-void task_calibracion(void *params) {
-    calib_result_t L = {0}, R = {0};
-
-    // Asumimos que tus tacómetros ya actualizan velocidad cada 100 ms.
-    // Hacemos sweep de Izquierda y Derecha, en avance.
-    sweep_rueda(MOTOR_LEFT,  true, &L);
-    sweep_rueda(MOTOR_RIGHT, true, &R);
-
-    printf("\n=== RESULTADOS CALIBRACIÓN (AVANCE) ===\n");
-    printf("LEFT : d_dead=%.1f | k=%.6f (m/s por nivel)\n",  L.d_dead, L.k);
-    printf("RIGHT: d_dead=%.1f | k=%.6f (m/s por nivel)\n",  R.d_dead, R.k);
-
-    // Podés guardar estos valores en variables globales o EEPROM si querés persistirlos.
-    // Luego, en tu lazo de control, usarás:
-    // u_ff_left  = L.d_dead  + v_ref / L.k;
-    // u_ff_right = R.d_dead  + v_ref / R.k;
-
-    // Terminar tarea si es one-shot
-    vTaskDelete(NULL);
-}
-
-
 int main()
 {
     stdio_init_all();
+    // Dar tiempo a que USB CDC enumere antes de prints/I2C intensivo
+    sleep_ms(800);
     configurar_gpio();
     motor_init();
     motor_set_direction(MOTOR_LEFT,true);  // Sentido "hacia adelante"
     motor_set_direction(MOTOR_RIGHT,true);
 
-    // Leer PID guardados en EEPROM (LEFT)
+    // Direcciones fijas PID
+    #define EEPROM_PIDL_ADDR 0x100
+    #define EEPROM_PIDR_ADDR 0x140
+
+    // Opcional: borrar prefijo (0x000-0x1FF) en el arranque. Desactivado por defecto para evitar bloqueos largos.
+    #define ERASE_PREFIX_AT_BOOT 0
+    #if ERASE_PREFIX_AT_BOOT
+    eeprom_erase_prefix(i2c1, 0x200); // 0x200 = EEPROM_LOG_BASE
+    #endif
+
+    // Valores por defecto (factory) si no existen en EEPROM
+    float Kp_left  = 90.0f, Ki_left  = 38.0f, Kd_left  = 0.20f;
+    float Kp_right = 75.0f, Ki_right = 35.0f, Kd_right = 0.18f;
+
+    // Buffers lectura
     char pidl_buf[48] = {0};
-    float Kp_left = 6.0f, Ki_left = 0.0f, Kd_left = 0.0f;
-    if (at24c32_read(i2c1, 0x100, (uint8_t*)pidl_buf, sizeof(pidl_buf))) {
+    char pidr_buf[48] = {0};
+
+    bool have_left = false, have_right = false;
+    if (at24c32_read(i2c1, EEPROM_PIDL_ADDR, (uint8_t*)pidl_buf, sizeof(pidl_buf))) {
         if (strncmp(pidl_buf, "PIDL:", 5) == 0) {
-            sscanf(pidl_buf+5, "%f,%f,%f", &Kp_left, &Ki_left, &Kd_left);
-            printf("[EEPROM] PID LEFT: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", Kp_left, Ki_left, Kd_left);
+            if (sscanf(pidl_buf+5, "%f,%f,%f", &Kp_left, &Ki_left, &Kd_left) == 3) {
+                have_left = true;
+            }
         }
     }
-    // Leer PID guardados en EEPROM (RIGHT)
-    char pidr_buf[48] = {0};
-    float Kp_right = 4.0f, Ki_right = 0.0f, Kd_right = 0.0f;
-    if (at24c32_read(i2c1, 0x140, (uint8_t*)pidr_buf, sizeof(pidr_buf))) {
+    if (at24c32_read(i2c1, EEPROM_PIDR_ADDR, (uint8_t*)pidr_buf, sizeof(pidr_buf))) {
         if (strncmp(pidr_buf, "PIDR:", 5) == 0) {
-            sscanf(pidr_buf+5, "%f,%f,%f", &Kp_right, &Ki_right, &Kd_right);
-            printf("[EEPROM] PID RIGHT: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", Kp_right, Ki_right, Kd_right);
+            if (sscanf(pidr_buf+5, "%f,%f,%f", &Kp_right, &Ki_right, &Kd_right) == 3) {
+                have_right = true;
+            }
         }
+    }
+
+    if (!have_left) {
+        // Persistir defaults si no existen
+        char tmp[48];
+        snprintf(tmp, sizeof(tmp), "PIDL:%.3f,%.3f,%.3f", Kp_left, Ki_left, Kd_left);
+        at24c32_write_str(i2c1, EEPROM_PIDL_ADDR, tmp);
+        printf("[EEPROM] PID LEFT (default escrito) Kp=%.3f Ki=%.3f Kd=%.3f\n", Kp_left, Ki_left, Kd_left);
+    } else {
+        printf("[EEPROM] PID LEFT: Kp=%.3f Ki=%.3f Kd=%.3f\n", Kp_left, Ki_left, Kd_left);
+    }
+    if (!have_right) {
+        char tmp[48];
+        snprintf(tmp, sizeof(tmp), "PIDR:%.3f,%.3f,%.3f", Kp_right, Ki_right, Kd_right);
+        at24c32_write_str(i2c1, EEPROM_PIDR_ADDR, tmp);
+        printf("[EEPROM] PID RIGHT (default escrito) Kp=%.3f Ki=%.3f Kd=%.3f\n", Kp_right, Ki_right, Kd_right);
+    } else {
+        printf("[EEPROM] PID RIGHT: Kp=%.3f Ki=%.3f Kd=%.3f\n", Kp_right, Ki_right, Kd_right);
     }
 
     //INICIALIZACION DE LAS COLAS 
-    q_codigo                = xQueueCreate(100 , sizeof(char[MAX_INPUT + 1])  );
-
     q_tacometro_left        = xQueueCreate(1 , sizeof(float) );
     q_tacometro_right       = xQueueCreate(1 , sizeof(float) );
     q_uart                  = xQueueCreate(1 , sizeof(char[MAX_INPUT + 1])  );
@@ -393,20 +263,15 @@ int main()
     init_uart();
 
     //INICIALIZACION DE LAS TAREAS 
-    //xTaskCreate(task_matrix     , "Matrix"      , 2 * configMINIMAL_STACK_SIZE  , NULL, 4, NULL);
-    
-    //xTaskCreate(task_lcd, "LCD",  configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-    //xTaskCreate(task_PID_left       , "PID Left"        , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
-    //xTaskCreate(task_PID_right      , "PID Right"       , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
-    //xTaskCreate(task_motor          , "Motor"           , configMINIMAL_STACK_SIZE *3  , NULL, 4, NULL);
+
     xTaskCreate(task_tacometro_left , "Tacometro Left"  , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
     xTaskCreate(task_tacometro_right, "Tacometro Right" , 2 * configMINIMAL_STACK_SIZE , NULL, 2, NULL);
-    xTaskCreate(task_bluetooth      , "Bluetooth"       , 2 * configMINIMAL_STACK_SIZE , NULL, 5, NULL);
-    // xTaskCreate(task_recto         , "Recto"          , configMINIMAL_STACK_SIZE , NULL, 3, NULL);
-
+    // Aumentamos el stack de Bluetooth para evitar overflow con printf y buffers locales
+    xTaskCreate(task_bluetooth      , "Bluetooth"       , 4 * configMINIMAL_STACK_SIZE , NULL, 5, NULL);
+    
     vTaskStartScheduler();
     while (true) {
-        // ...existing code...
+        printf("Error: se salió del scheduler!\n");
     }
 }
 

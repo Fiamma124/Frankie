@@ -100,15 +100,38 @@ bool at24c32_write_log(i2c_inst_t *i2c, uint16_t addr, const char* recorrido) {
 	return written == n+3;
 }
 
-// Borra toda la EEPROM AT24C32 escribiendo 0xFF en todas las páginas
+// Escribe un string (con terminador nulo) en una dirección fija de la AT24C32.
+// Limita a 47 caracteres útiles + '\0' para ajustarse a bloques de 48 si se usan en lectura.
+// Nota: Esta función asume que la escritura no cruza más de una página (32B). Para 0x100 y 0x140
+// (alineadas a página) y payloads < 32B, es suficiente.
+bool at24c32_write_str(i2c_inst_t *i2c, uint16_t addr, const char *str) {
+	if (!str) return false;
+	size_t n = strlen(str);
+	if (n > 47) n = 47; // truncar para reservar byte nulo si se usa bloque de 48B
+	uint8_t tx[2 + 48];
+	tx[0] = (addr >> 8) & 0xFF;
+	tx[1] = addr & 0xFF;
+	memcpy(&tx[2], str, n);
+	tx[2 + n] = '\0';
+	int written = i2c_write_blocking(i2c, AT24C32_I2C_ADDR, tx, 2 + (int)n + 1, false);
+	vTaskDelay(pdMS_TO_TICKS(5));
+	return written == (2 + (int)n + 1);
+}
+
+// Borra únicamente la región de LOG a partir de EEPROM_LOG_BASE (definida en task_bluetooth)
+// Preserva la zona 0x000-EEPROM_LOG_BASE-1 para parámetros fijos.
+// Si necesitas borrar TODO, crea otra función explícita (full erase) para evitar errores involuntarios.
 bool eeprom_erase(i2c_inst_t *i2c) {
-	const int TOTAL_SIZE = 4096; // tamaño típico AT24C32 en bytes
-	const int PAGE_SIZE = 32;    // escribir por páginas
+	const int TOTAL_SIZE = 4096;      // tamaño típico AT24C32 en bytes
+	const int PAGE_SIZE = 32;         // escribir por páginas
+    #ifndef EEPROM_LOG_BASE
+    #define EEPROM_LOG_BASE 0x200
+    #endif
+
 	uint8_t buf[PAGE_SIZE];
 	for (int i = 0; i < PAGE_SIZE; i++) buf[i] = 0xFF;
 
-	// Para cada página, enviamos la dirección (2 bytes) seguida de PAGE_SIZE bytes
-	for (int addr = 0; addr < TOTAL_SIZE; addr += PAGE_SIZE) {
+	for (int addr = EEPROM_LOG_BASE; addr < TOTAL_SIZE; addr += PAGE_SIZE) {
 		uint8_t reg[2];
 		reg[0] = (addr >> 8) & 0xFF;
 		reg[1] = addr & 0xFF;
@@ -118,18 +141,51 @@ bool eeprom_erase(i2c_inst_t *i2c) {
 		memcpy(&tx[2], buf, PAGE_SIZE);
 
 		int written = i2c_write_blocking(i2c, AT24C32_I2C_ADDR, tx, PAGE_SIZE + 2, false);
-		// Espera para que la EEPROM complete la escritura interna
-		vTaskDelay(pdMS_TO_TICKS(5));
+		vTaskDelay(pdMS_TO_TICKS(5)); // espera interna
 
 		if (written != PAGE_SIZE + 2) {
-			printf("Error borrando EEPROM en addr %d (escritos %d)\n", addr, written);
+			printf("Error borrando EEPROM (zona log) en addr 0x%03X (escritos %d)\n", addr, written);
 			return false;
 		}
-		// Log por páginas para diagnóstico
-		if ((addr % (PAGE_SIZE * 16)) == 0) { // cada 512 bytes informamos
-			printf("Borradas %d/%d bytes\n", addr, TOTAL_SIZE);
+		if (((addr - EEPROM_LOG_BASE) % (PAGE_SIZE * 16)) == 0) { // cada 512 bytes dentro de la zona log
+			printf("Borradas %d/%d bytes de zona log\n", addr - EEPROM_LOG_BASE, TOTAL_SIZE - EEPROM_LOG_BASE);
 		}
 	}
-	printf("EEPROM borrada correctamente\n");
+	printf("Zona de LOG EEPROM borrada (desde 0x%03X hasta fin).\n", EEPROM_LOG_BASE);
+	return true;
+}
+
+// Borra la región [0, end_addr) de la AT24C32 escribiendo 0xFF por páginas.
+// Útil para limpiar la zona reservada inicial (por ejemplo 0x000-0x1FF).
+bool eeprom_erase_prefix(i2c_inst_t *i2c, uint16_t end_addr) {
+	const int TOTAL_SIZE = 4096;
+	const int PAGE_SIZE = 32;
+	if (end_addr > TOTAL_SIZE) end_addr = TOTAL_SIZE;
+	if (end_addr == 0) return true; // nada que borrar
+
+	uint8_t buf[PAGE_SIZE];
+	for (int i = 0; i < PAGE_SIZE; i++) buf[i] = 0xFF;
+
+	for (int addr = 0; addr < end_addr; addr += PAGE_SIZE) {
+		uint8_t reg[2];
+		reg[0] = (addr >> 8) & 0xFF;
+		reg[1] = addr & 0xFF;
+		int to_write = (end_addr - addr >= PAGE_SIZE) ? PAGE_SIZE : (end_addr - addr);
+		uint8_t tx[2 + PAGE_SIZE];
+		tx[0] = reg[0];
+		tx[1] = reg[1];
+		memcpy(&tx[2], buf, to_write);
+
+		int written = i2c_write_blocking(i2c, AT24C32_I2C_ADDR, tx, 2 + to_write, false);
+		vTaskDelay(pdMS_TO_TICKS(5));
+		if (written != 2 + to_write) {
+			printf("Error borrando prefijo EEPROM en addr 0x%03X (escritos %d)\n", addr, written);
+			return false;
+		}
+		if ((addr % (PAGE_SIZE * 16)) == 0) { // cada 512 bytes
+			printf("Borradas %d/%d bytes (prefijo)\n", addr, end_addr);
+		}
+	}
+	printf("Prefijo EEPROM borrado correctamente (0x000-0x%03X)\n", end_addr - 1);
 	return true;
 }

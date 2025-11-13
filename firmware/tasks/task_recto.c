@@ -104,38 +104,32 @@ void task_recto(void *params) {
 
             // Parseo básico por prefijos
             if (strncmp(line, "TUNE ", 5) == 0) {
-                float kpL, kiL, kdL, kpR, kiR, kdR, v, t;
-                int n = sscanf(line + 5, "%f %f %f %f %f %f %f %f",
-                               &kpL, &kiL, &kdL, &kpR, &kiR, &kdR, &v, &t);
-                if (n == 8) {
+                float kpL, kiL, kdL, kpR, kiR, kdR;
+                int n = sscanf(line + 5, "%f %f %f %f %f %f", &kpL, &kiL, &kdL, &kpR, &kiR, &kdR);
+                if (n == 6) {
                     Kp_left = kpL; Ki_left = kiL; Kd_left = kdL;
                     Kp_right = kpR; Ki_right = kiR; Kd_right = kdR;
-                    v_set = v; t_sec = t;
-                    printf("[RECTO] TUNE OK: L(%.3f,%.3f,%.3f) R(%.3f,%.3f,%.3f) v=%.3f t=%.1f\n",
-                           Kp_left, Ki_left, Kd_left, Kp_right, Ki_right, Kd_right, v_set, t_sec);
-                    start_test = true;
+                    printf("OK\n");
                 } else {
-                    printf("[RECTO] ERROR TUNE: se esperan 8 valores\n");
+                    printf("ERROR\n");
                 }
             } else if (strncmp(line, "TUNE_L ", 7) == 0) {
                 float kpL, kiL, kdL;
                 int n = sscanf(line + 7, "%f %f %f", &kpL, &kiL, &kdL);
                 if (n == 3) {
                     Kp_left = kpL; Ki_left = kiL; Kd_left = kdL;
-                    printf("[RECTO] TUNE_L OK: L(%.3f,%.3f,%.3f)\n", Kp_left, Ki_left, Kd_left);
-                    start_test = true;
+                    printf("OK\n");
                 } else {
-                    printf("[RECTO] ERROR TUNE_L: se esperan 3 valores\n");
+                    printf("ERROR\n");
                 }
             } else if (strncmp(line, "TUNE_R ", 7) == 0) {
                 float kpR, kiR, kdR;
                 int n = sscanf(line + 7, "%f %f %f", &kpR, &kiR, &kdR);
                 if (n == 3) {
                     Kp_right = kpR; Ki_right = kiR; Kd_right = kdR;
-                    printf("[RECTO] TUNE_R OK: R(%.3f,%.3f,%.3f)\n", Kp_right, Ki_right, Kd_right);
-                    start_test = true;
+                    printf("OK\n");
                 } else {
-                    printf("[RECTO] ERROR TUNE_R: se esperan 3 valores\n");
+                    printf("ERROR\n");
                 }
             } else if (strncmp(line, "RUN ", 4) == 0) {
                 float v, t;
@@ -156,8 +150,8 @@ void task_recto(void *params) {
                     default:  v_set = 0.2f; break;
                 }
                 t_sec = 5.0f;
-                start_test = true;
-                printf("[RECTO] CMD corto -> v=%.3f t=%.1f\n", v_set, t_sec);
+                // Ya no se inicia automáticamente: requerir RUN
+                printf("[RECTO] Setpoint preparado (v=%.3f t=%.1f). Use 'RUN v t' para iniciar.\n", v_set, t_sec);
             } else {
                 printf("[RECTO] Comando ignorado: %s\n", line);
             }
