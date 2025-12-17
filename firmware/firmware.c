@@ -195,7 +195,7 @@ int main()
 {
     stdio_init_all();
     // Dar tiempo a que USB CDC enumere antes de prints/I2C intensivo
-    sleep_ms(800);
+    sleep_ms(1000);
     configurar_gpio();
     motor_init();
     motor_set_direction(MOTOR_LEFT,true);  // Sentido "hacia adelante"

@@ -25,13 +25,14 @@ void task_recto(void *params) {
     const float k_R      = 0.013f;   // [m/s por nivel]
 
     // --- PID inicial (ajustables por UART con TUNE/TUNE_L/TUNE_R) ---
-    float Kp_left  = 90.0f, Ki_left  = 38.0f, Kd_left  = 0.20f;
-    float Kp_right = 75.0f, Ki_right = 35.0f, Kd_right = 0.18f;
+    float Kp_left  = 90.0f, Ki_left  = 38.0f, Kd_left  = 0.10f;
+    float Kp_right = 75.0f, Ki_right = 35.0f, Kd_right = 0.09f;
 
     // --- Control diferencial (sin IMU) ---
     float Kp_diff = 0.90f;   // subí/bajá si corrige lento/oscila
     float Ki_diff = 0.35f;   // integra desbalance sostenido
     float integral_diff = 0.0f;
+    bool diff_enabled = false; // permite activar/desactivar la corrección diferencial por UART
 
     // --- Setpoint y duración de prueba ---
     float v_set = 0.2f; // m/s
@@ -56,9 +57,9 @@ void task_recto(void *params) {
     const float SLEW_PER_STEP = 25.0f;
     float u_left_prev = 0.0f, u_right_prev = 0.0f;
 
-    // Anti-windup por clamp
-    const float I_MAX_L = 2.0f / fmaxf(1.0f, Ki_left);
-    const float I_MAX_R = 2.0f / fmaxf(1.0f, Ki_right);
+    // Anti-windup por clamp: permitir hasta ~10 cuentas de PWM de aporte integral
+    float I_MAX_L = 10.0f / fmaxf(1.0f, Ki_left);
+    float I_MAX_R = 10.0f / fmaxf(1.0f, Ki_right);
 
     // --- Direcciones hacia adelante ---
     motor_set_direction(MOTOR_LEFT,  true);
@@ -73,7 +74,7 @@ void task_recto(void *params) {
     char cmd_buffer[MAX_INPUT + 1] = {0};
     char line[MAX_INPUT + 1] = {0};
 
-    printf("[RECTO] Listo. Enviá: TUNE ...# | TUNE_L ...# | TUNE_R ...# | RUN v t#\n");
+    printf("[RECTO] Listo. Enviá: TUNE ...# | TUNE_L ...# | TUNE_R ...# | RUN v t# | DIFF ON/OFF#\n");
 
     for (;;) {
         // 0) Revisar si llegó un comando por UART (no bloqueante)
@@ -109,6 +110,8 @@ void task_recto(void *params) {
                 if (n == 6) {
                     Kp_left = kpL; Ki_left = kiL; Kd_left = kdL;
                     Kp_right = kpR; Ki_right = kiR; Kd_right = kdR;
+                    I_MAX_L = 10.0f / fmaxf(1.0f, Ki_left);
+                    I_MAX_R = 10.0f / fmaxf(1.0f, Ki_right);
                     printf("OK\n");
                 } else {
                     printf("ERROR\n");
@@ -118,6 +121,7 @@ void task_recto(void *params) {
                 int n = sscanf(line + 7, "%f %f %f", &kpL, &kiL, &kdL);
                 if (n == 3) {
                     Kp_left = kpL; Ki_left = kiL; Kd_left = kdL;
+                    I_MAX_L = 10.0f / fmaxf(1.0f, Ki_left);
                     printf("OK\n");
                 } else {
                     printf("ERROR\n");
@@ -127,6 +131,7 @@ void task_recto(void *params) {
                 int n = sscanf(line + 7, "%f %f %f", &kpR, &kiR, &kdR);
                 if (n == 3) {
                     Kp_right = kpR; Ki_right = kiR; Kd_right = kdR;
+                    I_MAX_R = 10.0f / fmaxf(1.0f, Ki_right);
                     printf("OK\n");
                 } else {
                     printf("ERROR\n");
@@ -140,6 +145,19 @@ void task_recto(void *params) {
                     start_test = true;
                 } else {
                     printf("[RECTO] ERROR RUN: formato 'RUN v t'\n");
+                }
+            } else if (strncmp(line, "DIFF", 4) == 0) {
+                // Control diferencial ON/OFF para probar ruedas sin acople
+                if (strncmp(line, "DIFF OFF", 8) == 0) {
+                    diff_enabled = false;
+                    integral_diff = 0.0f; // reset para evitar arrastre al volver a ON
+                    printf("OK DIFF=OFF\n");
+                } else if (strncmp(line, "DIFF ON", 7) == 0) {
+                    diff_enabled = true;
+                    integral_diff = 0.0f; // arrancar limpio
+                    printf("OK DIFF=ON\n");
+                } else {
+                    printf("[RECTO] Uso: DIFF ON | DIFF OFF\n");
                 }
             } else if (line[0] >= '1' && line[0] <= '3' && line[1] != '\0') {
                 // Comandos cortos 1/2/3 para setpoints discretos
@@ -216,15 +234,22 @@ void task_recto(void *params) {
             if (u_ff_R > 255) u_ff_R = 255; if (u_ff_R < 0) u_ff_R = 0;
 
             // --- Control diferencial (sin IMU) ---
-            float e_diff = velR_f - velL_f;     // + si derecha va más rápido
-            integral_diff += e_diff * dt;
-            // Limitar la integral diferencial para evitar sesgos grandes
-            if (integral_diff > 0.5f) integral_diff = 0.5f;
-            if (integral_diff < -0.5f) integral_diff = -0.5f;
+            float bias = 0.0f;
+            if (diff_enabled) {
+                float e_diff = velR_f - velL_f;     // + si derecha va más rápido
+                integral_diff += e_diff * dt;
+                // Limitar la integral diferencial para evitar sesgos grandes
+                if (integral_diff > 0.5f) integral_diff = 0.5f;
+                if (integral_diff < -0.5f) integral_diff = -0.5f;
 
-            float bias = Kp_diff * e_diff + Ki_diff * integral_diff;
+                bias = Kp_diff * e_diff + Ki_diff * integral_diff;
+            } else {
+                // Si está desactivado, no acumular y forzar 0
+                integral_diff = 0.0f;
+                bias = 0.0f;
+            }
 
-            // Setpoints individuales corregidos
+            // Setpoints individuales corregidos (o iguales si DIFF=OFF)
             float vL_ref = v_set - 0.5f * bias;
             float vR_ref = v_set + 0.5f * bias;
 
@@ -276,10 +301,10 @@ void task_recto(void *params) {
             motor_set_speed(MOTOR_LEFT,  dutyL);
             motor_set_speed(MOTOR_RIGHT, dutyR);
 
-            // Log cada 0.5 s aprox (5 ciclos de 100 ms)
+            // Log cada 0.1 s (1 ciclo de 100 ms)
             static int print_counter = 0;
             print_counter++;
-            if (print_counter >= 5) {
+            if (print_counter >= 1) {
                 print_counter = 0;
                 float t_run = (float)(xTaskGetTickCount() - (test_deadline - pdMS_TO_TICKS((int)(t_sec * 1000.0f)))) / 1000.0f;
                 printf("t=%.1f  vL=%.3f  vR=%.3f  |  vLref=%.3f vRref=%.3f  |  uFF_L=%.1f  uFF_R=%.1f  |  uL=%.1f  uR=%.1f  |  eL=%.3f  eR=%.3f  | bias=%.3f\n",
@@ -295,6 +320,8 @@ void task_recto(void *params) {
                 motor_set_speed(MOTOR_RIGHT, 0);
                 test_active = false;
                 printf("\n--- Fin de prueba (%.1f s). Motores detenidos ---\n", t_sec);
+                vTaskDelay(pdMS_TO_TICKS(20)); // breve pausa antes de ACK
+                printf("ACK#\n");
             }
         } else {
             // Espera pasiva breve para no quemar CPU

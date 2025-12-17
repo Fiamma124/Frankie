@@ -49,8 +49,6 @@ static uint16_t eeprom_find_next_log_addr(i2c_inst_t *i2c) {
     return 0xFFFF; // lleno
 }
 
-// (Eliminado) Lectura en trozos: el usuario prefiere usar at24c32_read directamente.
-
 static void sanitize_line(const char *in, char *out, size_t out_sz) {
     // Quita espacios/quotes al inicio/fin, elimina quotes internos, colapsa espacios, y mayusculiza
     const char *p = in;
@@ -125,6 +123,8 @@ void task_bluetooth(void *params) {
                     memset(buffer, 0, sizeof(buffer));
                     continue;
                 }
+                //vTaskDelay(pdMS_TO_TICKS(20)); // breve pausa antes de ACK
+                //printf("ACK#\n"); // Acuse inmediato de línea completa recibida
                 printf("Secuencia completa recibida: %s\n", line);
 
                 if (strlen(line) == 1 && line[0] == 'T') {
@@ -132,6 +132,7 @@ void task_bluetooth(void *params) {
                     at24c32_write_log(i2c1, eeprom_addr, "T#");
                     eeprom_addr += LOG_RECORD_SIZE;
                     if (eeprom_addr + LOG_RECORD_SIZE > EEPROM_TOTAL_BYTES) eeprom_addr = EEPROM_LOG_BASE;
+                    // ACK ya enviado al recibir la línea
                 }
                 else if (strlen(line) == 1 && line[0] == 'M') {
                     // Menú (ASCII puro y pausado para evitar floods en USB)
@@ -146,6 +147,7 @@ void task_bluetooth(void *params) {
                     bt_menu_println("TUNE_L kpL kiL kdL# | TUNE_R kpR kiR kdR# (no inicia)");
                     bt_menu_println("RUN v t# - Iniciar recto con setpoint v (m/s) por t (s)");
                     bt_menu_println("------------------------------------");
+                    // ACK ya enviado al recibir la línea
                 }
                 else if (strlen(line) == 1 && line[0] == 'L') { //Muestra en pantalla el Log EEPROM
                     const int registro_size = LOG_RECORD_SIZE;
@@ -190,6 +192,7 @@ void task_bluetooth(void *params) {
                         at24c32_write_log(i2c1, eeprom_addr, "L#");
                         eeprom_addr += LOG_RECORD_SIZE;
                         if (eeprom_addr + LOG_RECORD_SIZE > EEPROM_TOTAL_BYTES) eeprom_addr = EEPROM_LOG_BASE;
+                        // ACK ya enviado al recibir la línea
                 }
                 else if (strlen(line) == 1 && line[0] == 'E') {// Borra el log de la EEPROM desde la base
                     printf("Comando E# recibido: borrando LOG de la EEPROM...\n");
@@ -200,6 +203,7 @@ void task_bluetooth(void *params) {
                         at24c32_write_log(i2c1, eeprom_addr, "E#");
                         eeprom_addr += LOG_RECORD_SIZE;
                         if (eeprom_addr + LOG_RECORD_SIZE > EEPROM_TOTAL_BYTES) eeprom_addr = EEPROM_LOG_BASE;
+                        // ACK ya enviado al recibir la línea (solo en éxito)
                     } else {
                         printf("Borrado fallido: no se registrará el evento E# en EEPROM\n");
                     }
@@ -233,6 +237,7 @@ void task_bluetooth(void *params) {
                                      Kp_left, Ki_left, Kd_left, Kp_right, Ki_right, Kd_right);
                             if (xQueueSend(q_uart, tune_cmd, pdMS_TO_TICKS(500)) == pdTRUE) {
                                 printf("ENVIADO %s\n", tune_cmd);
+                                // ACK ya enviado al recibir la línea
                             } else {
                                 printf("ERROR_COLA\n");
                             }
@@ -283,6 +288,7 @@ void task_bluetooth(void *params) {
                     } else {
                         printf("[EEPROM] PID RIGHT: No guardado\n");
                     }
+                    // ACK ya enviado al recibir la línea
                 }
                 else if (strncmp(line, "TUNE ", 5) == 0 || strncmp(line, "TUNE_L ", 7) == 0 ||
                          strncmp(line, "TUNE_R ", 7) == 0 || strncmp(line, "RUN ", 4) == 0) {
@@ -295,6 +301,7 @@ void task_bluetooth(void *params) {
                     // Enviar línea completa a q_uart para que task_recto la parsee
                     if (xQueueSend(q_uart, line, pdMS_TO_TICKS(500)) == pdTRUE) {
                         printf("ENVIADO %s\n", line);
+                        // ACK ya enviado al recibir la línea
                     } else {
                         printf("ERROR_COLA\n");
                     }
@@ -302,6 +309,8 @@ void task_bluetooth(void *params) {
                 else {
                     // Comando desconocido o formato inválido
                     printf("Comando no reconocido: '%s'\n", line);
+                    vTaskDelay(pdMS_TO_TICKS(20)); // breve pausa antes de ACK
+                    printf("ACK#\n");
                 }
 
                 // Reset de línea
